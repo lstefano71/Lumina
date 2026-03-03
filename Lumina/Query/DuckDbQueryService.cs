@@ -150,7 +150,7 @@ public sealed class DuckDbQueryService : IDisposable
     var whereClause = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
 
     var sql = $@"
-            SELECT * FROM read_parquet([{fileList}])
+            SELECT * FROM read_parquet([{fileList}],union_by_name=true)
             {whereClause}
             ORDER BY timestamp DESC
             LIMIT {limit}";
@@ -186,7 +186,7 @@ public sealed class DuckDbQueryService : IDisposable
     var fileList = string.Join(", ", files.Select(f => $"'{f}'"));
 
     var sql = $@"
-            SELECT * FROM read_parquet([{fileList}])
+            SELECT * FROM read_parquet([{fileList}],union_by_name=true)
             WHERE message ILIKE '%{searchTerm}%'
                OR stream ILIKE '%{searchTerm}%'
             ORDER BY timestamp DESC
@@ -241,7 +241,7 @@ public sealed class DuckDbQueryService : IDisposable
                 MAX(timestamp) as latest_timestamp,
                 level,
                 COUNT(*) as count_by_level
-            FROM read_parquet([{fileList}])
+            FROM read_parquet([{fileList}],union_by_name=true)
             {whereClause}
             GROUP BY level
             ORDER BY count_by_level DESC";
