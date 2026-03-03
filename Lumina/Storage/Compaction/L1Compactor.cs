@@ -115,10 +115,24 @@ public sealed class L1Compactor
       // Update cursor
       _cursorManager.MarkCompactionComplete(stream, currentLastWalFile!, currentLastOffset, outputPath);
 
-      // Delete sealed WAL files — all non-active files are now fully represented in Parquet
+      // If the active WAL file was included in this compaction, rotate it now so it
+      // becomes a sealed file eligible for deletion. It is intentionally kept alive
+      // for one more cycle because entries may have been appended to it after the
+      // compaction read (between currentLastOffset and the rotation point). Those
+      // entries will be picked up and the file deleted on the next compaction run.
       var activeFilePath = _walManager.GetActiveWriterFilePath(stream);
+      string? deferredDeletePath = null;
+      if (string.Equals(currentLastWalFile, activeFilePath, StringComparison.OrdinalIgnoreCase)) {
+        deferredDeletePath = activeFilePath;
+        await _walManager.ForceRotateAsync(stream, cancellationToken);
+        activeFilePath = _walManager.GetActiveWriterFilePath(stream);
+        _logger.LogDebug("Rotated active WAL file {File} after compaction", Path.GetFileName(deferredDeletePath));
+      }
+
+      // Delete all sealed WAL files (non-active, non-deferred) — they are fully represented in Parquet
       foreach (var walFile in _walManager.GetWalFiles(stream)) {
-        if (string.Equals(walFile, activeFilePath, StringComparison.OrdinalIgnoreCase)) {
+        if (string.Equals(walFile, activeFilePath, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(walFile, deferredDeletePath, StringComparison.OrdinalIgnoreCase)) {
           continue;
         }
 

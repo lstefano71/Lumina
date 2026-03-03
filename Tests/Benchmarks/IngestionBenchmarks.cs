@@ -19,7 +19,7 @@ namespace Lumina.Tests.Benchmarks;
 /// </summary>
 [MemoryDiagnoser]
 // FIX 4: was RuntimeMoniker.Net90 (.NET 9) – corrected to Net100 (.NET 10).
-[SimpleJob(RuntimeMoniker.Net100, iterationCount: 5, warmupCount: 2)]
+[SimpleJob(RuntimeMoniker.Net10_0, iterationCount: 5, warmupCount: 2)]
 [Config(typeof(Config))]
 public class IngestionBenchmarks
 {
