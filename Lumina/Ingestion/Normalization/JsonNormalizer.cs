@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Lumina.Core.Models;
 using Lumina.Ingestion.Models;
 
@@ -20,7 +21,7 @@ public static class JsonNormalizer
       Timestamp = EnsureUtc(request.Timestamp),
       Level = NormalizeLevel(request.Level),
       Message = request.Message,
-      Attributes = request.Attributes ?? new Dictionary<string, object?>(),
+      Attributes = UnwrapAttributes(request.Attributes),
       TraceId = request.TraceId,
       SpanId = request.SpanId,
       DurationMs = request.DurationMs
@@ -47,7 +48,7 @@ public static class JsonNormalizer
         Timestamp = EnsureUtc(entry.Timestamp),
         Level = NormalizeLevel(entry.Level),
         Message = entry.Message,
-        Attributes = entry.Attributes ?? new Dictionary<string, object?>(),
+        Attributes = UnwrapAttributes(entry.Attributes),
         TraceId = entry.TraceId,
         SpanId = entry.SpanId,
         DurationMs = entry.DurationMs
@@ -56,6 +57,30 @@ public static class JsonNormalizer
 
     return entries;
   }
+
+  /// <summary>
+  /// Unwraps any <see cref="JsonElement"/> values produced by System.Text.Json
+  /// during model binding into plain CLR types that MessagePack can serialize.
+  /// </summary>
+  private static Dictionary<string, object?> UnwrapAttributes(Dictionary<string, object?>? attributes)
+  {
+    if (attributes is null || attributes.Count == 0)
+      return new Dictionary<string, object?>();
+
+    var result = new Dictionary<string, object?>(attributes.Count);
+    foreach (var (key, value) in attributes)
+      result[key] = value is JsonElement je ? UnwrapJsonElement(je) : value;
+    return result;
+  }
+
+  private static object? UnwrapJsonElement(JsonElement element) => element.ValueKind switch {
+    JsonValueKind.String  => element.GetString(),
+    JsonValueKind.True    => true,
+    JsonValueKind.False   => false,
+    JsonValueKind.Null    => null,
+    JsonValueKind.Number  => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+    _                     => element.GetRawText()
+  };
 
   /// <summary>
   /// Normalizes log level to lowercase standard format.

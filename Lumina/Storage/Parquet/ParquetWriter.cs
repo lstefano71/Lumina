@@ -1,6 +1,6 @@
 using Apache.Arrow;
-using Apache.Arrow.Ipc;
 using Apache.Arrow.Types;
+using ParquetSharp.Arrow;
 
 using Lumina.Core.Models;
 
@@ -20,7 +20,7 @@ public static class ParquetWriter
   /// <param name="outputPath">The output file path.</param>
   /// <param name="maxDynamicKeys">Maximum dynamic keys before overflow.</param>
   /// <param name="cancellationToken">Cancellation token.</param>
-  public static async Task WriteBatchAsync(
+  public static Task WriteBatchAsync(
       IReadOnlyList<LogEntry> entries,
       string outputPath,
       int maxDynamicKeys = 100,
@@ -52,12 +52,12 @@ public static class ParquetWriter
       Directory.CreateDirectory(directory);
     }
 
-    // Write to file using Apache Arrow IPC
-    await using var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
-    using var writer = new ArrowStreamWriter(fileStream, arrowSchema);
+    // Write to Parquet file
+    using var writer = new FileWriter(outputPath, arrowSchema);
+    writer.WriteRecordBatch(recordBatch);
+    writer.Close();
 
-    await writer.WriteRecordBatchAsync(recordBatch, cancellationToken);
-    await writer.WriteEndAsync(cancellationToken);
+    return Task.CompletedTask;
   }
 
   /// <summary>

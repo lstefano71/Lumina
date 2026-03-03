@@ -241,6 +241,10 @@ public sealed class WalManager : IAsyncDisposable
     var walFiles = GetWalFiles(stream);
 
     foreach (var file in walFiles) {
+      if (new FileInfo(file).Length < WalFileHeader.Size) {
+        continue;
+      }
+
       using var reader = await GetReaderAsync(file, stream, cancellationToken);
 
       await foreach (var walEntry in reader.ReadEntriesAsync(cancellationToken)) {

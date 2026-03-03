@@ -41,11 +41,10 @@ public sealed class DuckDbQueryService : IDisposable
   /// </summary>
   public async Task InitializeAsync(CancellationToken cancellationToken = default)
   {
-    var connectionString = $"Data Source={_settings.DatabasePath}";
-    _connection = new DuckDBConnection(connectionString);
+    _connection = new DuckDBConnection("DataSource=:memory:");
     await _connection.OpenAsync(cancellationToken);
 
-    _logger.LogInformation("DuckDB connection opened at {Path}", _settings.DatabasePath);
+    _logger.LogInformation("DuckDB in-memory connection opened");
   }
 
   /// <summary>

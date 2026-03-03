@@ -117,10 +117,7 @@ public sealed class WalWriter : IAsyncDisposable
       var offset = _currentOffset;
 
       await _fileStream.WriteAsync(buffer.AsMemory(0, totalSize), cancellationToken);
-
-      if (_settings.EnableWriteThrough) {
-        _fileStream.Flush();
-      }
+      await _fileStream.FlushAsync(cancellationToken);
 
       _currentOffset += totalSize;
 
@@ -175,10 +172,7 @@ public sealed class WalWriter : IAsyncDisposable
       }
 
       await _fileStream.WriteAsync(buffer.AsMemory(0, totalSize), cancellationToken);
-
-      if (_settings.EnableWriteThrough) {
-        _fileStream.Flush();
-      }
+      await _fileStream.FlushAsync(cancellationToken);
 
       return offsets;
     } finally {
@@ -212,12 +206,9 @@ public sealed class WalWriter : IAsyncDisposable
     header.WriteTo(buffer);
 
     await _fileStream.WriteAsync(buffer, cancellationToken);
+    await _fileStream.FlushAsync(cancellationToken);
     _currentOffset = WalFileHeader.Size;
     _headerWritten = true;
-
-    if (_settings.EnableWriteThrough) {
-      _fileStream.Flush();
-    }
   }
 
   private void EnsureHeaderWritten()
