@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8' />
+<title>Lumina.Tests.Benchmarks.IngestionBenchmarks-20260303-222036</title>
+
+<style type="text/css">
+	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
+	td, th { padding: 6px 13px; border: 1px solid #ddd; text-align: right; }
+	tr { background-color: #fff; border-top: 1px solid #ccc; }
+	tr:nth-child(even) { background: #f8f8f8; }
+</style>
+</head>
+<body>
+<pre><code>
+BenchmarkDotNet v0.15.8, Windows 10 (10.0.19045.6456/22H2/2022Update)
+Intel Core i7-6700 CPU 3.40GHz (Max: 3.41GHz) (Skylake), 1 CPU, 8 logical and 4 physical cores
+.NET SDK 10.0.103
+  [Host]     : .NET 10.0.3 (10.0.3, 10.0.326.7603), X64 RyuJIT x86-64-v3
+  DefaultJob : .NET 10.0.3 (10.0.3, 10.0.326.7603), X64 RyuJIT x86-64-v3
+</code></pre>
+<pre><code></code></pre>
+
+<table>
+<thead><tr><th>Method               </th><th>BatchSize</th><th>Mean  </th><th>Error</th><th>StdDev</th><th>P95   </th><th>MB/s</th><th>Gen0</th><th>Gen1</th><th>Allocated</th>
+</tr>
+</thead><tbody><tr><td>&#39;WAL WriteBatchAsync&#39;</td><td>1000</td><td>2.213 ms</td><td>0.0271 ms</td><td>0.0212 ms</td><td>2.241 ms</td><td>97,4</td><td>74.2188</td><td>23.4375</td><td>328.64 KB</td>
+</tr><tr><td>&#39;WAL Sequential WriteAsync&#39;</td><td>1000</td><td>226.622 ms</td><td>1.3224 ms</td><td>1.1043 ms</td><td>228.076 ms</td><td>1,0</td><td>-</td><td>-</td><td>601.75 KB</td>
+</tr><tr><td>&#39;WAL WriteBatchAsync&#39;</td><td>10000</td><td>19.477 ms</td><td>0.2609 ms</td><td>0.2440 ms</td><td>19.850 ms</td><td>110,7</td><td>593.7500</td><td>375.0000</td><td>3281.78 KB</td>
+</tr><tr><td>&#39;WAL Sequential WriteAsync&#39;</td><td>10000</td><td>2,282.325 ms</td><td>16.1673 ms</td><td>15.1229 ms</td><td>2,311.018 ms</td><td>0,9</td><td>1000.0000</td><td>-</td><td>6015.81 KB</td>
+</tr></tbody></table>
+</body>
+</html>

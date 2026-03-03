@@ -10,16 +10,7 @@ using Lumina.Storage.Wal;
 
 namespace Lumina.Tests.Benchmarks;
 
-/// <summary>
-/// BenchmarkDotNet harness measuring WAL write throughput.
-/// Target: ≥ 500 MB/s sustained ingestion.
-///
-/// Run from the command line with:
-///   dotnet run -c Release --project Tools/BenchRunner
-/// </summary>
 [MemoryDiagnoser]
-// FIX 4: was RuntimeMoniker.Net90 (.NET 9) – corrected to Net100 (.NET 10).
-[SimpleJob(RuntimeMoniker.Net100, iterationCount: 5, warmupCount: 2)]
 [Config(typeof(Config))]
 public class IngestionBenchmarks
 {
@@ -99,9 +90,6 @@ public class IngestionBenchmarks
     }
   }
 
-  /// <summary>
-  /// Custom column that computes MB/s throughput from the benchmark results.
-  /// </summary>
   private sealed class ThroughputColumn : IColumn
   {
     // FIX 3: compute actual on-disk bytes PER ENTRY in the host process (where this column

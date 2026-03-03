@@ -34,7 +34,13 @@ public sealed class CursorManager
   {
     lock (_lock) {
       if (_cursors.TryGetValue(stream, out var cursor)) {
-        return cursor;
+        return new CompactionCursor {
+          Stream = cursor.Stream,
+          LastCompactedWalFile = cursor.LastCompactedWalFile,
+          LastCompactedOffset = cursor.LastCompactedOffset,
+          LastCompactionTime = cursor.LastCompactionTime,
+          LastParquetFile = cursor.LastParquetFile
+        };
       }
 
       return new CompactionCursor { Stream = stream };

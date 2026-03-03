@@ -1,0 +1,10 @@
+using BenchmarkDotNet.Running;
+using Lumina.Tests.Benchmarks;
+
+public class Program
+{
+  public static void Main(string[] args)
+  {
+    BenchmarkRunner.Run<IngestionBenchmarks>();
+  }
+}

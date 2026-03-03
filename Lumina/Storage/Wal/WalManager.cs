@@ -12,6 +12,7 @@ public sealed class WalManager : IAsyncDisposable
 {
   private readonly WalSettings _settings;
   private readonly ConcurrentDictionary<string, WalWriter> _writers = new();
+  private readonly ConcurrentBag<WalWriter> _rotatedWriters = new();
   private readonly string _baseDirectory;
   private bool _disposed;
 
@@ -55,7 +56,12 @@ public sealed class WalManager : IAsyncDisposable
     var filePath = GetWalPath(stream, DateTime.UtcNow);
     var newWriter = await WalWriter.CreateAsync(filePath, stream, _settings, cancellationToken);
 
-    return _writers.GetOrAdd(stream, newWriter);
+    var actual = _writers.GetOrAdd(stream, newWriter);
+    if (actual != newWriter) {
+      // Another thread won the race; dispose our writer to avoid leaking file handles
+      await newWriter.DisposeAsync();
+    }
+    return actual;
   }
 
   /// <summary>
@@ -79,14 +85,19 @@ public sealed class WalManager : IAsyncDisposable
     // Get the current file path before rotation
     var oldPath = writer.FilePath;
 
-    // Dispose and remove the old writer
-    await writer.DisposeAsync();
-    _writers.TryRemove(stream, out _);
-
-    // Create a new writer with a fresh timestamp
+    // Create a new writer BEFORE swapping to avoid disposing one still in use
     var newFilePath = GetWalPath(stream, DateTime.UtcNow);
     var newWriter = await WalWriter.CreateAsync(newFilePath, stream, _settings, cancellationToken);
-    _writers[stream] = newWriter;
+
+    // Atomic swap: only succeeds if the writer hasn't been rotated by another thread
+    if (_writers.TryUpdate(stream, newWriter, writer)) {
+      // Flush the old writer so all data is persisted, then defer its disposal
+      try { await writer.FlushAsync(); } catch (ObjectDisposedException) { }
+      _rotatedWriters.Add(writer);
+    } else {
+      // Another thread already rotated; dispose the writer we just created
+      await newWriter.DisposeAsync();
+    }
 
     return oldPath;
   }
@@ -101,17 +112,23 @@ public sealed class WalManager : IAsyncDisposable
   {
     ObjectDisposedException.ThrowIf(_disposed, this);
 
-    if (!_writers.TryRemove(stream, out var writer)) {
+    if (!_writers.TryGetValue(stream, out var writer)) {
       return null;
     }
 
     var oldPath = writer.FilePath;
-    await writer.DisposeAsync();
 
-    // Create a new writer
+    // Create a new writer BEFORE swapping
     var newFilePath = GetWalPath(stream, DateTime.UtcNow);
     var newWriter = await WalWriter.CreateAsync(newFilePath, stream, _settings, cancellationToken);
-    _writers[stream] = newWriter;
+
+    if (_writers.TryUpdate(stream, newWriter, writer)) {
+      // Force rotate is an explicit operation; dispose the old writer immediately
+      // so its file handle is released and the file can be deleted by compaction.
+      await writer.DisposeAsync();
+    } else {
+      await newWriter.DisposeAsync();
+    }
 
     return oldPath;
   }
@@ -327,12 +344,17 @@ public sealed class WalManager : IAsyncDisposable
 
     _disposed = true;
 
-    // Dispose all writers
+    // Dispose all active writers
     foreach (var writer in _writers.Values) {
       await writer.DisposeAsync();
     }
 
     _writers.Clear();
+
+    // Dispose rotated writers that were kept alive for in-flight writes
+    while (_rotatedWriters.TryTake(out var old)) {
+      await old.DisposeAsync();
+    }
   }
 }
 
