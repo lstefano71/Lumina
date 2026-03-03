@@ -86,4 +86,4 @@ yarn-error.log*
 *.prof
 *.coverage
 /Lumina/data
-/Lumina/data-dev/test-stream
+/Lumina/data-dev
