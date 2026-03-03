@@ -1,151 +1,148 @@
 using FluentAssertions;
+
 using Lumina.Core.Configuration;
 using Lumina.Core.Models;
 using Lumina.Storage.Wal;
+
 using Xunit;
 
 namespace Lumina.Tests.Storage;
 
 public class WalWriterTests : WalTestBase
 {
-    [Fact]
-    public async Task CreateAsync_ShouldCreateFileWithValidHeader()
+  [Fact]
+  public async Task CreateAsync_ShouldCreateFileWithValidHeader()
+  {
+    // Arrange
+    var settings = GetTestSettings();
+    var filePath = GetWalPath("test-stream");
+
+    // Act
+    await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+
+    // Assert
+    File.Exists(filePath).Should().BeTrue();
+    writer.FilePath.Should().Be(filePath);
+    writer.Stream.Should().Be("test-stream");
+  }
+
+  [Fact]
+  public async Task WriteAsync_ShouldWriteSingleEntry()
+  {
+    // Arrange
+    var settings = GetTestSettings();
+    var filePath = GetWalPath("test-stream");
+    var entry = CreateTestEntry();
+
+    await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+
+    // Act
+    var offset = await writer.WriteAsync(entry);
+
+    // Assert
+    offset.Should().BeGreaterOrEqualTo(WalFileHeader.Size);
+    writer.FileSize.Should().BeGreaterThan(WalFileHeader.Size);
+  }
+
+  [Fact]
+  public async Task WriteBatchAsync_ShouldWriteMultipleEntries()
+  {
+    // Arrange
+    var settings = GetTestSettings();
+    var filePath = GetWalPath("test-stream");
+    var entries = new[]
     {
-        // Arrange
-        var settings = GetTestSettings();
-        var filePath = GetWalPath("test-stream");
-        
-        // Act
-        await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
-        
-        // Assert
-        File.Exists(filePath).Should().BeTrue();
-        writer.FilePath.Should().Be(filePath);
-        writer.Stream.Should().Be("test-stream");
-    }
-    
-    [Fact]
-    public async Task WriteAsync_ShouldWriteSingleEntry()
-    {
-        // Arrange
-        var settings = GetTestSettings();
-        var filePath = GetWalPath("test-stream");
-        var entry = CreateTestEntry();
-        
-        await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
-        
-        // Act
-        var offset = await writer.WriteAsync(entry);
-        
-        // Assert
-        offset.Should().BeGreaterOrEqualTo(WalFileHeader.Size);
-        writer.FileSize.Should().BeGreaterThan(WalFileHeader.Size);
-    }
-    
-    [Fact]
-    public async Task WriteBatchAsync_ShouldWriteMultipleEntries()
-    {
-        // Arrange
-        var settings = GetTestSettings();
-        var filePath = GetWalPath("test-stream");
-        var entries = new[]
-        {
             CreateTestEntry(message: "Message 1"),
             CreateTestEntry(message: "Message 2"),
             CreateTestEntry(message: "Message 3")
         };
-        
-        await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
-        
-        // Act
-        var offsets = await writer.WriteBatchAsync(entries);
-        
-        // Assert
-        offsets.Should().HaveCount(3);
-        offsets[0].Should().BeGreaterOrEqualTo(WalFileHeader.Size);
-        offsets[1].Should().BeGreaterThan(offsets[0]);
-        offsets[2].Should().BeGreaterThan(offsets[1]);
+
+    await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+
+    // Act
+    var offsets = await writer.WriteBatchAsync(entries);
+
+    // Assert
+    offsets.Should().HaveCount(3);
+    offsets[0].Should().BeGreaterOrEqualTo(WalFileHeader.Size);
+    offsets[1].Should().BeGreaterThan(offsets[0]);
+    offsets[2].Should().BeGreaterThan(offsets[1]);
+  }
+
+  [Fact]
+  public async Task WriteAsync_ShouldPersistToFile()
+  {
+    // Arrange
+    var settings = GetTestSettings();
+    var filePath = GetWalPath("test-stream");
+    var entry = CreateTestEntry();
+
+    // Act - Write and dispose
+    await using (var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings)) {
+      await writer.WriteAsync(entry);
     }
-    
-    [Fact]
-    public async Task WriteAsync_ShouldPersistToFile()
-    {
-        // Arrange
-        var settings = GetTestSettings();
-        var filePath = GetWalPath("test-stream");
-        var entry = CreateTestEntry();
-        
-        // Act - Write and dispose
-        await using (var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings))
-        {
-            await writer.WriteAsync(entry);
-        }
-        
-        // Assert - File should exist with content
-        File.Exists(filePath).Should().BeTrue();
-        var fileInfo = new FileInfo(filePath);
-        fileInfo.Length.Should().BeGreaterThan(WalFileHeader.Size);
+
+    // Assert - File should exist with content
+    File.Exists(filePath).Should().BeTrue();
+    var fileInfo = new FileInfo(filePath);
+    fileInfo.Length.Should().BeGreaterThan(WalFileHeader.Size);
+  }
+
+  [Fact]
+  public async Task FlushAsync_ShouldNotThrow()
+  {
+    // Arrange
+    var settings = GetTestSettings();
+    var filePath = GetWalPath("test-stream");
+    var entry = CreateTestEntry();
+
+    await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+    await writer.WriteAsync(entry);
+
+    // Act
+    var act = async () => await writer.FlushAsync();
+
+    // Assert
+    await act.Should().NotThrowAsync();
+  }
+
+  [Fact]
+  public async Task NeedsRotation_ShouldReturnTrue_WhenSizeExceeded()
+  {
+    // Arrange
+    var settings = new WalSettings {
+      DataDirectory = TempDirectory,
+      MaxWalSizeBytes = 100, // Very small limit
+      EnableWriteThrough = false,
+      FlushIntervalMs = 100
+    };
+    var filePath = GetWalPath("test-stream");
+
+    await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+
+    // Write enough entries to exceed limit
+    for (int i = 0; i < 20; i++) {
+      await writer.WriteAsync(CreateTestEntry(message: new string('x', 100)));
     }
-    
-    [Fact]
-    public async Task FlushAsync_ShouldNotThrow()
-    {
-        // Arrange
-        var settings = GetTestSettings();
-        var filePath = GetWalPath("test-stream");
-        var entry = CreateTestEntry();
-        
-        await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
-        await writer.WriteAsync(entry);
-        
-        // Act
-        var act = async () => await writer.FlushAsync();
-        
-        // Assert
-        await act.Should().NotThrowAsync();
-    }
-    
-    [Fact]
-    public async Task NeedsRotation_ShouldReturnTrue_WhenSizeExceeded()
-    {
-        // Arrange
-        var settings = new WalSettings
-        {
-            DataDirectory = TempDirectory,
-            MaxWalSizeBytes = 100, // Very small limit
-            EnableWriteThrough = false,
-            FlushIntervalMs = 100
-        };
-        var filePath = GetWalPath("test-stream");
-        
-        await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
-        
-        // Write enough entries to exceed limit
-        for (int i = 0; i < 20; i++)
-        {
-            await writer.WriteAsync(CreateTestEntry(message: new string('x', 100)));
-        }
-        
-        // Act
-        var needsRotation = writer.NeedsRotation();
-        
-        // Assert
-        needsRotation.Should().BeTrue();
-    }
-    
-    private static LogEntry CreateTestEntry(string stream = "test-stream", string message = "Test message")
-    {
-        return new LogEntry
-        {
-            Stream = stream,
-            Timestamp = DateTime.UtcNow,
-            Level = "info",
-            Message = message,
-            Attributes = new Dictionary<string, object?>
-            {
-                ["key1"] = "value1",
-                ["key2"] = 42
-            }
-        };
-    }
+
+    // Act
+    var needsRotation = writer.NeedsRotation();
+
+    // Assert
+    needsRotation.Should().BeTrue();
+  }
+
+  private static LogEntry CreateTestEntry(string stream = "test-stream", string message = "Test message")
+  {
+    return new LogEntry {
+      Stream = stream,
+      Timestamp = DateTime.UtcNow,
+      Level = "info",
+      Message = message,
+      Attributes = new Dictionary<string, object?> {
+        ["key1"] = "value1",
+        ["key2"] = 42
+      }
+    };
+  }
 }
