@@ -1,19 +1,21 @@
-using Apache.Arrow;
-using Apache.Arrow.Ipc;
-
 using Lumina.Core.Models;
+
+using Parquet.Data;
 
 using System.Text.Json;
 
 namespace Lumina.Storage.Parquet;
 
 /// <summary>
-/// Reads log entries from Parquet/Arrow files.
+/// Reads log entries from Parquet files using parquet-dotnet.
 /// </summary>
 public static class ParquetReader
 {
+  private static readonly HashSet<string> FixedColumns =
+      new() { "stream", "timestamp", "level", "message", "trace_id", "span_id", "duration_ms", "_meta" };
+
   /// <summary>
-  /// Reads all log entries from an Arrow IPC file.
+  /// Reads all log entries from a Parquet file.
   /// </summary>
   /// <param name="filePath">The file path to read.</param>
   /// <param name="cancellationToken">Cancellation token.</param>
@@ -23,24 +25,76 @@ public static class ParquetReader
       [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
   {
     await using var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
-    using var reader = new ArrowStreamReader(fileStream);
+    using var reader = await global::Parquet.ParquetReader.CreateAsync(fileStream, cancellationToken: cancellationToken);
 
-    // Schema is read automatically with the first record batch
+    var dataFields = reader.Schema.GetDataFields();
 
-    while (true) {
-      var recordBatch = await reader.ReadNextRecordBatchAsync(cancellationToken);
-      if (recordBatch == null || recordBatch.Length == 0) {
-        break;
+    for (int groupIdx = 0; groupIdx < reader.RowGroupCount; groupIdx++) {
+      cancellationToken.ThrowIfCancellationRequested();
+
+      using var rowGroupReader = reader.OpenRowGroupReader(groupIdx);
+
+      // Read all columns for this row group
+      var columns = new Dictionary<string, DataColumn>(dataFields.Length);
+      foreach (var field in dataFields) {
+        var column = await rowGroupReader.ReadColumnAsync(field, cancellationToken);
+        columns[field.Name] = column;
       }
 
-      foreach (var entry in ParseRecordBatch(recordBatch)) {
+      if (columns.Count == 0) {
+        continue;
+      }
+
+      var rowCount = columns.Values.First().Data.Length;
+
+      for (int i = 0; i < rowCount; i++) {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var entry = new LogEntry {
+          Stream = GetString(columns, "stream", i) ?? "unknown",
+          Timestamp = GetDateTime(columns, "timestamp", i) ?? DateTime.UtcNow,
+          Level = GetString(columns, "level", i) ?? "info",
+          Message = GetString(columns, "message", i) ?? "",
+          TraceId = GetString(columns, "trace_id", i),
+          SpanId = GetString(columns, "span_id", i),
+          DurationMs = GetNullableInt(columns, "duration_ms", i),
+          Attributes = new Dictionary<string, object?>()
+        };
+
+        // Parse dynamic attribute columns
+        foreach (var (name, column) in columns) {
+          if (FixedColumns.Contains(name)) {
+            continue;
+          }
+
+          var value = GetColumnValue(column, i);
+          if (value != null) {
+            entry.Attributes[name] = value;
+          }
+        }
+
+        // Parse _meta overflow column
+        var metaJson = GetString(columns, "_meta", i);
+        if (!string.IsNullOrEmpty(metaJson)) {
+          try {
+            var meta = JsonSerializer.Deserialize<Dictionary<string, object?>>(metaJson);
+            if (meta != null) {
+              foreach (var kvp in meta) {
+                entry.Attributes[kvp.Key] = kvp.Value;
+              }
+            }
+          } catch {
+            // Ignore JSON parse errors
+          }
+        }
+
         yield return entry;
       }
     }
   }
 
   /// <summary>
-  /// Reads a batch of log entries from an Arrow file.
+  /// Reads a batch of log entries from a Parquet file.
   /// </summary>
   /// <param name="filePath">The file path to read.</param>
   /// <param name="cancellationToken">Cancellation token.</param>
@@ -58,161 +112,76 @@ public static class ParquetReader
     return entries;
   }
 
-  private static IEnumerable<LogEntry> ParseRecordBatch(RecordBatch batch)
+  private static string? GetString(Dictionary<string, DataColumn> columns, string name, int rowIndex)
   {
-    var columnNames = batch.Schema.FieldsList.Select(f => f.Name).ToList();
-    var rowCount = batch.Length;
-
-    // Get column indices
-    var streamCol = GetColumnIndex(batch, "stream");
-    var timestampCol = GetColumnIndex(batch, "timestamp");
-    var levelCol = GetColumnIndex(batch, "level");
-    var messageCol = GetColumnIndex(batch, "message");
-    var traceIdCol = GetColumnIndex(batch, "trace_id");
-    var spanIdCol = GetColumnIndex(batch, "span_id");
-    var durationMsCol = GetColumnIndex(batch, "duration_ms");
-    var metaCol = GetColumnIndex(batch, "_meta");
-
-    for (int i = 0; i < rowCount; i++) {
-      var entry = new LogEntry {
-        Stream = streamCol >= 0 ? GetStringColumnValue(batch, streamCol, i) : "unknown",
-        Timestamp = timestampCol >= 0 ? GetTimestampColumnValue(batch, timestampCol, i) : DateTime.UtcNow,
-        Level = levelCol >= 0 ? GetStringColumnValue(batch, levelCol, i) : "info",
-        Message = messageCol >= 0 ? GetStringColumnValue(batch, messageCol, i) : "",
-        TraceId = traceIdCol >= 0 ? GetNullableStringColumnValue(batch, traceIdCol, i) : null,
-        SpanId = spanIdCol >= 0 ? GetNullableStringColumnValue(batch, spanIdCol, i) : null,
-        DurationMs = durationMsCol >= 0 ? GetNullableIntColumnValue(batch, durationMsCol, i) : null,
-        Attributes = new Dictionary<string, object?>()
-      };
-
-      // Parse dynamic columns (not fixed columns)
-      var fixedColumns = new HashSet<string> { "stream", "timestamp", "level", "message", "trace_id", "span_id", "duration_ms", "_meta" };
-
-      for (int colIdx = 0; colIdx < batch.ColumnCount; colIdx++) {
-        var colName = columnNames[colIdx];
-        if (fixedColumns.Contains(colName)) {
-          continue;
-        }
-
-        var value = GetColumnValue(batch, colIdx, i);
-        if (value != null) {
-          entry.Attributes[colName] = value;
-        }
-      }
-
-      // Parse _meta overflow column
-      if (metaCol >= 0) {
-        var metaJson = GetNullableStringColumnValue(batch, metaCol, i);
-        if (!string.IsNullOrEmpty(metaJson)) {
-          try {
-            var meta = JsonSerializer.Deserialize<Dictionary<string, object?>>(metaJson);
-            if (meta != null) {
-              foreach (var kvp in meta) {
-                entry.Attributes[kvp.Key] = kvp.Value;
-              }
-            }
-          } catch {
-            // Ignore JSON parse errors
-          }
-        }
-      }
-
-      yield return entry;
-    }
-  }
-
-  private static int GetColumnIndex(RecordBatch batch, string columnName)
-  {
-    for (int i = 0; i < batch.Schema.FieldsList.Count; i++) {
-      if (batch.Schema.FieldsList[i].Name == columnName) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  private static string GetStringColumnValue(RecordBatch batch, int columnIndex, int rowIndex)
-  {
-    var column = batch.Column(columnIndex);
-    if (column is StringArray stringArray) {
-      return stringArray.GetString(rowIndex);
-    }
-    return "";
-  }
-
-  private static string? GetNullableStringColumnValue(RecordBatch batch, int columnIndex, int rowIndex)
-  {
-    var column = batch.Column(columnIndex);
-    if (column is StringArray stringArray) {
-      if (stringArray.IsNull(rowIndex)) {
-        return null;
-      }
-      return stringArray.GetString(rowIndex);
-    }
-    return null;
-  }
-
-  private static int? GetNullableIntColumnValue(RecordBatch batch, int columnIndex, int rowIndex)
-  {
-    var column = batch.Column(columnIndex);
-    if (column is Int32Array intArray) {
-      if (intArray.IsNull(rowIndex)) {
-        return null;
-      }
-      return intArray.GetValue(rowIndex);
-    }
-    return null;
-  }
-
-  private static DateTime GetTimestampColumnValue(RecordBatch batch, int columnIndex, int rowIndex)
-  {
-    var column = batch.Column(columnIndex);
-    if (column is TimestampArray timestampArray) {
-      var dto = timestampArray.GetTimestamp(rowIndex);
-      if (dto.HasValue) {
-        return dto.Value.UtcDateTime;
-      }
-    }
-    return DateTime.UtcNow;
-  }
-
-  private static object? GetColumnValue(RecordBatch batch, int columnIndex, int rowIndex)
-  {
-    var column = batch.Column(columnIndex);
-
-    if (column.IsNull(rowIndex)) {
+    if (!columns.TryGetValue(name, out var column)) {
       return null;
     }
 
-    if (column is StringArray str) {
-      return str.GetString(rowIndex);
-    }
-    if (column is Int32Array i32) {
-      return i32.GetValue(rowIndex);
-    }
-    if (column is Int64Array i64) {
-      return i64.GetValue(rowIndex);
-    }
-    if (column is FloatArray f32) {
-      return f32.GetValue(rowIndex);
-    }
-    if (column is DoubleArray f64) {
-      return f64.GetValue(rowIndex);
-    }
-    if (column is BooleanArray b) {
-      return b.GetValue(rowIndex);
-    }
-    if (column is TimestampArray ts) {
-      var dto = ts.GetTimestamp(rowIndex);
-      if (dto.HasValue) {
-        return dto.Value.UtcDateTime;
-      }
-      return null;
-    }
-    if (column is BinaryArray bin) {
-      return bin.GetBytes(rowIndex).ToArray();
+    var data = column.Data;
+    if (data is string[] strArray) {
+      return strArray[rowIndex];
     }
 
     return null;
+  }
+
+  private static DateTime? GetDateTime(Dictionary<string, DataColumn> columns, string name, int rowIndex)
+  {
+    if (!columns.TryGetValue(name, out var column)) {
+      return null;
+    }
+
+    var data = column.Data;
+    if (data is DateTime[] dtArray) {
+      return dtArray[rowIndex];
+    }
+    if (data is DateTimeOffset[] dtoArray) {
+      return dtoArray[rowIndex].UtcDateTime;
+    }
+
+    return null;
+  }
+
+  private static int? GetNullableInt(Dictionary<string, DataColumn> columns, string name, int rowIndex)
+  {
+    if (!columns.TryGetValue(name, out var column)) {
+      return null;
+    }
+
+    var data = column.Data;
+    if (data is int?[] nullableIntArray) {
+      return nullableIntArray[rowIndex];
+    }
+    if (data is int[] intArray) {
+      return intArray[rowIndex];
+    }
+
+    return null;
+  }
+
+  private static object? GetColumnValue(DataColumn column, int rowIndex)
+  {
+    var data = column.Data;
+
+    return data switch {
+      string[] arr => arr[rowIndex],
+      int?[] arr => arr[rowIndex],
+      int[] arr => arr[rowIndex],
+      long?[] arr => arr[rowIndex],
+      long[] arr => arr[rowIndex],
+      float?[] arr => arr[rowIndex],
+      float[] arr => arr[rowIndex],
+      double?[] arr => arr[rowIndex],
+      double[] arr => arr[rowIndex],
+      bool?[] arr => arr[rowIndex],
+      bool[] arr => arr[rowIndex],
+      DateTime?[] arr => arr[rowIndex],
+      DateTime[] arr => arr[rowIndex],
+      DateTimeOffset?[] arr => (object?)arr[rowIndex]?.UtcDateTime,
+      DateTimeOffset[] arr => arr[rowIndex].UtcDateTime,
+      byte[][] arr => arr[rowIndex],
+      _ => null
+    };
   }
 }
