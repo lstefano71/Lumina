@@ -1,0 +1,87 @@
+## Ignore Visual Studio temporary files, build results, and user-specific files
+
+# Visual Studio
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+**/bin/
+**/obj/
+
+# Rider
+.idea/
+*.sln.iml
+
+# NuGet
+*.nupkg
+.nuget/packages/
+packages/
+artifacts/
+
+# Dotnet publish
+publish/
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# ReSharper
+_ReSharper*/
+*.DotSettings.user
+
+# Build artifacts
+*.dll
+*.exe
+*.pdb
+*.cache
+*.ilk
+*.log
+
+# Test results
+TestResults/
+*.trx
+coverage*/
+*.coverage
+*.coveragexml
+
+# Dotnet tools
+.dotnet/
+dotnet-tools.json
+
+# User secrets and local configuration
+secrets.json
+.env
+.env.*
+
+# MSBuild generated files
+*.user
+*.suo
+*.userprefs
+
+# Generated code
+*.g.cs
+*.g.i.cs
+Generated/
+
+# Database files
+*.mdf
+*.ldf
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ignore coverage and profiling outputs
+*.prof
+*.coverage
