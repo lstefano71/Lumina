@@ -12,6 +12,11 @@ public sealed class CompactionCursor
   public required string Stream { get; init; }
 
   /// <summary>
+  /// Gets or sets the last compacted WAL file name.
+  /// </summary>
+  public string? LastCompactedWalFile { get; set; }
+
+  /// <summary>
   /// Gets or sets the last compacted offset in the WAL file.
   /// </summary>
   public long LastCompactedOffset { get; set; }

@@ -56,14 +56,33 @@ public sealed class L1Compactor
     var cursor = _cursorManager.GetCursor(stream);
     var entries = new List<LogEntry>();
     var lastOffset = cursor.LastCompactedOffset;
+    var lastWalFile = cursor.LastCompactedWalFile;
+    var currentLastWalFile = lastWalFile;
+    var currentLastOffset = lastOffset;
 
     // Read entries from WAL since last compaction
-    await foreach (var entry in _walManager.ReadEntriesAsync(stream, cancellationToken)) {
-      if (entry.Offset > cursor.LastCompactedOffset) {
-        entries.Add(entry);
-        if (entry.Offset > lastOffset) {
-          lastOffset = entry.Offset;
+    var walFiles = _walManager.GetWalFiles(stream);
+    foreach (var walFile in walFiles) {
+      if (lastWalFile != null) {
+        int cmp = string.Compare(walFile, lastWalFile, StringComparison.Ordinal);
+        if (cmp < 0) {
+          // File is older than the cursor's last compacted file, skip it entirely
+          continue;
         }
+      }
+
+      using var reader = await _walManager.GetReaderAsync(walFile, stream, cancellationToken);
+      await foreach (var walEntry in reader.ReadEntriesAsync(cancellationToken)) {
+        if (lastWalFile != null && walFile == lastWalFile && walEntry.Offset <= cursor.LastCompactedOffset) {
+          // Skip already compacted entries in the cursor's file
+          continue;
+        }
+
+        walEntry.LogEntry.Offset = walEntry.Offset;
+        entries.Add(walEntry.LogEntry);
+
+        currentLastWalFile = walFile;
+        currentLastOffset = walEntry.Offset;
       }
     }
 
@@ -94,12 +113,12 @@ public sealed class L1Compactor
       await ParquetWriter.WriteBatchAsync(entries, outputPath, _settings.MaxDynamicKeys, cancellationToken);
 
       // Update cursor
-      _cursorManager.MarkCompactionComplete(stream, lastOffset, outputPath);
+      _cursorManager.MarkCompactionComplete(stream, currentLastWalFile!, currentLastOffset, outputPath);
 
       // Delete sealed WAL files — all non-active files are now fully represented in Parquet
       var activeFilePath = _walManager.GetActiveWriterFilePath(stream);
       foreach (var walFile in _walManager.GetWalFiles(stream)) {
-        if (walFile == activeFilePath) {
+        if (string.Equals(walFile, activeFilePath, StringComparison.OrdinalIgnoreCase)) {
           continue;
         }
 

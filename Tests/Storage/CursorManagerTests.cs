@@ -84,7 +84,7 @@ public class CursorManagerTests : WalTestBase
   {
     var manager = new CursorManager(CursorDir);
 
-    manager.MarkCompactionComplete("stream-a", 5000, "file1.parquet");
+    manager.MarkCompactionComplete("stream-a", "file1.wal", 5000, "file1.parquet");
     var cursor = manager.GetCursor("stream-a");
 
     cursor.LastCompactedOffset.Should().Be(5000);
@@ -96,8 +96,8 @@ public class CursorManagerTests : WalTestBase
   {
     var manager = new CursorManager(CursorDir);
 
-    manager.MarkCompactionComplete("stream-a", 5000, "file1.parquet");
-    manager.MarkCompactionComplete("stream-a", 3000, "file0.parquet"); // earlier offset
+    manager.MarkCompactionComplete("stream-a", "file1.wal", 5000, "file1.parquet");
+    manager.MarkCompactionComplete("stream-a", "file1.wal", 3000, "file0.parquet"); // earlier offset
 
     var cursor = manager.GetCursor("stream-a");
     cursor.LastCompactedOffset.Should().Be(5000, "cursor should not move backwards");
@@ -107,19 +107,19 @@ public class CursorManagerTests : WalTestBase
   public void IsOffsetCompacted_TrueForOlderOffset()
   {
     var manager = new CursorManager(CursorDir);
-    manager.MarkCompactionComplete("stream-a", 5000, "file.parquet");
+    manager.MarkCompactionComplete("stream-a", "file1.wal", 5000, "file.parquet");
 
-    manager.IsOffsetCompacted("stream-a", 4000).Should().BeTrue();
-    manager.IsOffsetCompacted("stream-a", 5000).Should().BeTrue();
+    manager.IsOffsetCompacted("stream-a", "file1.wal", 4000).Should().BeTrue();
+    manager.IsOffsetCompacted("stream-a", "file1.wal", 5000).Should().BeTrue();
   }
 
   [Fact]
   public void IsOffsetCompacted_FalseForNewerOffset()
   {
     var manager = new CursorManager(CursorDir);
-    manager.MarkCompactionComplete("stream-a", 5000, "file.parquet");
+    manager.MarkCompactionComplete("stream-a", "file1.wal", 5000, "file.parquet");
 
-    manager.IsOffsetCompacted("stream-a", 6000).Should().BeFalse();
+    manager.IsOffsetCompacted("stream-a", "file1.wal", 6000).Should().BeFalse();
   }
 
   [Fact]
@@ -127,9 +127,9 @@ public class CursorManagerTests : WalTestBase
   {
     var manager = new CursorManager(CursorDir);
 
-    manager.MarkCompactionComplete("alpha", 100, "a.parquet");
-    manager.MarkCompactionComplete("beta", 200, "b.parquet");
-    manager.MarkCompactionComplete("gamma", 300, "c.parquet");
+    manager.MarkCompactionComplete("alpha", "a.wal", 100, "a.parquet");
+    manager.MarkCompactionComplete("beta", "b.wal", 200, "b.parquet");
+    manager.MarkCompactionComplete("gamma", "c.wal", 300, "c.parquet");
 
     var all = manager.GetAllCursors();
 

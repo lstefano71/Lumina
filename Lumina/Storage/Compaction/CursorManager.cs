@@ -67,13 +67,27 @@ public sealed class CursorManager
   /// Marks a compaction batch as complete.
   /// </summary>
   /// <param name="stream">The stream name.</param>
+  /// <param name="lastWalFile">The last WAL file processed.</param>
   /// <param name="lastOffset">The last offset compacted.</param>
   /// <param name="parquetFile">The output Parquet file path.</param>
-  public void MarkCompactionComplete(string stream, long lastOffset, string parquetFile)
+  public void MarkCompactionComplete(string stream, string lastWalFile, long lastOffset, string parquetFile)
   {
     var cursor = GetCursor(stream);
 
-    if (lastOffset > cursor.LastCompactedOffset) {
+    bool shouldUpdate = false;
+    if (cursor.LastCompactedWalFile == null) {
+      shouldUpdate = true;
+    } else {
+      int cmp = string.Compare(lastWalFile, cursor.LastCompactedWalFile, StringComparison.Ordinal);
+      if (cmp > 0) {
+        shouldUpdate = true;
+      } else if (cmp == 0 && lastOffset > cursor.LastCompactedOffset) {
+        shouldUpdate = true;
+      }
+    }
+
+    if (shouldUpdate) {
+      cursor.LastCompactedWalFile = lastWalFile;
       cursor.LastCompactedOffset = lastOffset;
       cursor.LastParquetFile = parquetFile;
       cursor.LastCompactionTime = DateTime.UtcNow;
@@ -83,15 +97,24 @@ public sealed class CursorManager
   }
 
   /// <summary>
-  /// Checks if a WAL file has been compacted up to the given offset.
+  /// Checks if a WAL file has been compacted up to the given offset (assuming it's in the same file).
+  /// Note: Not safe to use without file name context. Maintained for backward compatibility.
   /// </summary>
   /// <param name="stream">The stream name.</param>
+  /// <param name="walFile">The WAL file name.</param>
   /// <param name="offset">The offset to check.</param>
   /// <returns>True if the offset has been compacted.</returns>
-  public bool IsOffsetCompacted(string stream, long offset)
+  public bool IsOffsetCompacted(string stream, string walFile, long offset)
   {
     var cursor = GetCursor(stream);
-    return offset <= cursor.LastCompactedOffset;
+
+    if (cursor.LastCompactedWalFile == null) return false;
+
+    int cmp = string.Compare(walFile, cursor.LastCompactedWalFile, StringComparison.Ordinal);
+    if (cmp < 0) return true; // Older file is fully compacted
+    if (cmp > 0) return false; // Newer file is not compacted
+
+    return offset <= cursor.LastCompactedOffset; // Same file, check offset
   }
 
   private void LoadCursors()
