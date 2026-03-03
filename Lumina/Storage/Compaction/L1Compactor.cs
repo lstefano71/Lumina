@@ -87,7 +87,7 @@ public sealed class L1Compactor
     var startTime = entries.Min(e => e.Timestamp);
     var endTime = entries.Max(e => e.Timestamp);
     var outputFileName = ParquetWriter.GenerateFileName(stream, startTime, endTime);
-    var outputPath = Path.Combine(outputDir, outputFileName);
+    var outputPath = Path.GetFullPath(Path.Combine(outputDir, outputFileName));
 
     try {
       // Write Parquet file
@@ -95,6 +95,18 @@ public sealed class L1Compactor
 
       // Update cursor
       _cursorManager.MarkCompactionComplete(stream, lastOffset, outputPath);
+
+      // Delete sealed WAL files — all non-active files are now fully represented in Parquet
+      var activeFilePath = _walManager.GetActiveWriterFilePath(stream);
+      foreach (var walFile in _walManager.GetWalFiles(stream)) {
+        if (walFile == activeFilePath) {
+          continue;
+        }
+
+        if (_walManager.DeleteWalFile(walFile)) {
+          _logger.LogDebug("Deleted compacted WAL file {File}", Path.GetFileName(walFile));
+        }
+      }
 
       _logger.LogInformation(
           "Compacted {Count} entries for stream {Stream} to {File}",

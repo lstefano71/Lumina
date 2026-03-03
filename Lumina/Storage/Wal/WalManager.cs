@@ -177,6 +177,18 @@ public sealed class WalManager : IAsyncDisposable
   }
 
   /// <summary>
+  /// Gets the file path of the active WAL writer for a stream, or null if no writer is open.
+  /// This file must not be deleted during compaction as it is still being written to.
+  /// </summary>
+  /// <param name="stream">The stream name.</param>
+  /// <returns>The active WAL file path, or null.</returns>
+  public string? GetActiveWriterFilePath(string stream)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+    return _writers.TryGetValue(stream, out var writer) ? writer.FilePath : null;
+  }
+
+  /// <summary>
   /// Gets the current WAL file size for a stream.
   /// </summary>
   /// <param name="stream">The stream name.</param>

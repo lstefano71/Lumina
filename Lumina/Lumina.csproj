@@ -15,7 +15,7 @@
 
   <ItemGroup>
     <PackageReference Include="Apache.Arrow" Version="*" />
-    <PackageReference Include="ParquetSharp" Version="*" />
+    <PackageReference Include="Parquet.Net" Version="*" />
     <PackageReference Include="DuckDB.NET.Data.Full" Version="*" />
     <PackageReference Include="MessagePack" Version="3.*" />
     <PackageReference Include="Google.Protobuf" Version="*" />

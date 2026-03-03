@@ -1,6 +1,7 @@
-using System.Text.Json;
 using Lumina.Core.Models;
 using Lumina.Ingestion.Models;
+
+using System.Text.Json;
 
 namespace Lumina.Ingestion.Normalization;
 
@@ -74,12 +75,12 @@ public static class JsonNormalizer
   }
 
   private static object? UnwrapJsonElement(JsonElement element) => element.ValueKind switch {
-    JsonValueKind.String  => element.GetString(),
-    JsonValueKind.True    => true,
-    JsonValueKind.False   => false,
-    JsonValueKind.Null    => null,
-    JsonValueKind.Number  => element.TryGetInt64(out var l) ? l : element.GetDouble(),
-    _                     => element.GetRawText()
+    JsonValueKind.String => element.GetString(),
+    JsonValueKind.True => true,
+    JsonValueKind.False => false,
+    JsonValueKind.Null => null,
+    JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+    _ => element.GetRawText()
   };
 
   /// <summary>
