@@ -3,10 +3,13 @@
 
 using Lumina.Core.Configuration;
 using Lumina.Ingestion.Endpoints;
+using Lumina.Observability;
 using Lumina.Query;
 using Lumina.Query.Endpoints;
 using Lumina.Storage.Compaction;
 using Lumina.Storage.Wal;
+
+using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -72,6 +75,14 @@ builder.Services.AddSingleton<DuckDbQueryService>(sp => {
   return new DuckDbQueryService(settings, parquetManager, logger);
 });
 
+// Register observability
+builder.Services.AddSingleton<LuminaMetrics>();
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => {
+      metrics.AddMeter(LuminaMetrics.MeterName);
+      metrics.AddPrometheusExporter();
+    });
+
 // Register hosted services
 builder.Services.AddHostedService<CompactorService>();
 
@@ -88,6 +99,9 @@ if (app.Environment.IsDevelopment()) {
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "Lumina API v1");
   });
 }
+
+// Prometheus metrics endpoint
+app.MapPrometheusScrapingEndpoint("/metrics");
 
 // Map ingestion endpoints
 JsonIngestionEndpoint.MapEndpoints(app);
