@@ -14,10 +14,22 @@ namespace Lumina.Tests.Storage;
 
 /// <summary>
 /// End-to-end integration tests that exercise the full pipeline:
-/// Ingest → WAL → Compaction → Parquet → Read.
+/// Ingest → wal → Compaction → Parquet → Read.
 /// </summary>
 public class EndToEndTests : WalTestBase
 {
+  private CursorManager CreateCursorManager(string cursorDirectory)
+  {
+    var validator = new CursorValidator();
+    return new CursorManager(
+        cursorDirectory,
+        validator,
+        recoveryService: null,
+        NullLogger<CursorManager>.Instance,
+        enableValidation: true,
+        enableRecovery: false);
+  }
+
   [Fact]
   public async Task FullPipeline_IngestCompactRead_ShouldRoundTrip()
   {
@@ -31,7 +43,7 @@ public class EndToEndTests : WalTestBase
     };
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings.CursorDirectory);
     var logger = NullLogger<L1Compactor>.Instance;
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings, logger);
 
@@ -85,7 +97,7 @@ public class EndToEndTests : WalTestBase
     };
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings.CursorDirectory);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
@@ -122,7 +134,7 @@ public class EndToEndTests : WalTestBase
     };
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings.CursorDirectory);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 

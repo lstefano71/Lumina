@@ -64,4 +64,27 @@ public sealed class CompactionSettings
   /// Default is "data/cursors".
   /// </summary>
   public string CursorDirectory { get; init; } = "data/cursors";
+
+  // --- Cursor resiliency settings ---
+
+  /// <summary>
+  /// Gets a value indicating whether cursor file validation is enabled.
+  /// When enabled, cursor files are validated with checksum verification.
+  /// Default is true.
+  /// </summary>
+  public bool EnableCursorValidation { get; init; } = true;
+
+  /// <summary>
+  /// Gets a value indicating whether cursor recovery is enabled.
+  /// When enabled, corrupted cursors are automatically recovered from WAL/Parquet files.
+  /// Default is true.
+  /// </summary>
+  public bool EnableCursorRecovery { get; init; } = true;
+
+  /// <summary>
+  /// Gets a value indicating whether strict validation mode is enabled.
+  /// When enabled, cross-validation with filesystem is performed on cursor load.
+  /// Default is false.
+  /// </summary>
+  public bool StrictValidationMode { get; init; } = false;
 }

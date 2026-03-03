@@ -49,9 +49,27 @@ builder.Services.AddSingleton<WalManager>(sp => {
   return new WalManager(settings);
 });
 
+// Register cursor validation and recovery services
+builder.Services.AddSingleton<CursorValidator>();
+builder.Services.AddSingleton<CursorRecoveryService>(sp => {
+  var walManager = sp.GetRequiredService<WalManager>();
+  var settings = sp.GetRequiredService<CompactionSettings>();
+  var logger = sp.GetRequiredService<ILogger<CursorRecoveryService>>();
+  return new CursorRecoveryService(walManager, settings, logger);
+});
+
 builder.Services.AddSingleton<CursorManager>(sp => {
   var settings = sp.GetRequiredService<CompactionSettings>();
-  return new CursorManager(settings.CursorDirectory);
+  var validator = sp.GetRequiredService<CursorValidator>();
+  var recoveryService = sp.GetRequiredService<CursorRecoveryService>();
+  var logger = sp.GetRequiredService<ILogger<CursorManager>>();
+  return new CursorManager(
+      settings.CursorDirectory,
+      validator,
+      recoveryService,
+      logger,
+      settings.EnableCursorValidation,
+      settings.EnableCursorRecovery);
 });
 
 builder.Services.AddSingleton<L1Compactor>(sp => {

@@ -59,6 +59,7 @@ public sealed class L1Compactor
     var lastWalFile = cursor.LastCompactedWalFile;
     var currentLastWalFile = lastWalFile;
     var currentLastOffset = lastOffset;
+    long? currentWalFileSize = null;
 
     // Read entries from WAL since last compaction
     var walFiles = _walManager.GetWalFiles(stream);
@@ -83,6 +84,11 @@ public sealed class L1Compactor
 
         currentLastWalFile = walFile;
         currentLastOffset = walEntry.Offset;
+      }
+
+      // Track the file size for the current WAL file
+      if (walFile == currentLastWalFile) {
+        currentWalFileSize = reader.FileSize;
       }
     }
 
@@ -112,8 +118,14 @@ public sealed class L1Compactor
       // Write Parquet file
       await ParquetWriter.WriteBatchAsync(entries, outputPath, _settings.MaxDynamicKeys, cancellationToken);
 
-      // Update cursor
-      _cursorManager.MarkCompactionComplete(stream, currentLastWalFile!, currentLastOffset, outputPath);
+      // Update cursor with validation metadata
+      _cursorManager.MarkCompactionComplete(
+          stream,
+          currentLastWalFile!,
+          currentLastOffset,
+          outputPath,
+          walFileSize: currentWalFileSize,
+          parquetEntryCount: entries.Count);
 
       // If the active WAL file was included in this compaction, rotate it now so it
       // becomes a sealed file eligible for deletion. It is intentionally kept alive

@@ -7,16 +7,48 @@ namespace Lumina.Storage.Compaction;
 /// <summary>
 /// Manages compaction cursors for tracking WAL → Parquet progress.
 /// Ensures idempotent compaction with exactly-once semantics.
+/// Uses checksum-protected files with validation and recovery support.
 /// </summary>
 public sealed class CursorManager
 {
   private readonly string _cursorDirectory;
+  private readonly CursorValidator _validator;
+  private readonly CursorRecoveryService? _recoveryService;
+  private readonly ILogger<CursorManager>? _logger;
   private readonly object _lock = new();
   private readonly Dictionary<string, CompactionCursor> _cursors = new();
+  private readonly Dictionary<string, CursorRecoveryInfo> _recoveryStats = new();
+  private readonly bool _enableValidation;
+  private readonly bool _enableRecovery;
 
-  public CursorManager(string cursorDirectory)
+  private static readonly JsonSerializerOptions JsonOptions = new() {
+    WriteIndented = true,
+    PropertyNameCaseInsensitive = true
+  };
+
+  /// <summary>
+  /// Initializes a new instance of the CursorManager class.
+  /// </summary>
+  /// <param name="cursorDirectory">The directory to store cursor files.</param>
+  /// <param name="validator">The cursor validator.</param>
+  /// <param name="recoveryService">Optional recovery service for corrupted cursors.</param>
+  /// <param name="logger">Optional logger.</param>
+  /// <param name="enableValidation">Whether to enable validation (default: true).</param>
+  /// <param name="enableRecovery">Whether to enable recovery (default: true).</param>
+  public CursorManager(
+      string cursorDirectory,
+      CursorValidator validator,
+      CursorRecoveryService? recoveryService = null,
+      ILogger<CursorManager>? logger = null,
+      bool enableValidation = true,
+      bool enableRecovery = true)
   {
     _cursorDirectory = cursorDirectory;
+    _validator = validator;
+    _recoveryService = recoveryService;
+    _logger = logger;
+    _enableValidation = enableValidation;
+    _enableRecovery = enableRecovery;
 
     if (!Directory.Exists(cursorDirectory)) {
       Directory.CreateDirectory(cursorDirectory);
@@ -39,7 +71,9 @@ public sealed class CursorManager
           LastCompactedWalFile = cursor.LastCompactedWalFile,
           LastCompactedOffset = cursor.LastCompactedOffset,
           LastCompactionTime = cursor.LastCompactionTime,
-          LastParquetFile = cursor.LastParquetFile
+          LastParquetFile = cursor.LastParquetFile,
+          LastWalFileSize = cursor.LastWalFileSize,
+          LastParquetEntryCount = cursor.LastParquetEntryCount
         };
       }
 
@@ -70,13 +104,31 @@ public sealed class CursorManager
   }
 
   /// <summary>
+  /// Gets recovery statistics for all streams.
+  /// </summary>
+  public IReadOnlyDictionary<string, CursorRecoveryInfo> GetRecoveryStats()
+  {
+    lock (_lock) {
+      return new Dictionary<string, CursorRecoveryInfo>(_recoveryStats);
+    }
+  }
+
+  /// <summary>
   /// Marks a compaction batch as complete.
   /// </summary>
   /// <param name="stream">The stream name.</param>
   /// <param name="lastWalFile">The last WAL file processed.</param>
   /// <param name="lastOffset">The last offset compacted.</param>
   /// <param name="parquetFile">The output Parquet file path.</param>
-  public void MarkCompactionComplete(string stream, string lastWalFile, long lastOffset, string parquetFile)
+  /// <param name="walFileSize">Optional WAL file size for validation.</param>
+  /// <param name="parquetEntryCount">Optional Parquet entry count for validation.</param>
+  public void MarkCompactionComplete(
+      string stream,
+      string lastWalFile,
+      long lastOffset,
+      string parquetFile,
+      long? walFileSize = null,
+      int? parquetEntryCount = null)
   {
     var cursor = GetCursor(stream);
 
@@ -97,6 +149,8 @@ public sealed class CursorManager
       cursor.LastCompactedOffset = lastOffset;
       cursor.LastParquetFile = parquetFile;
       cursor.LastCompactionTime = DateTime.UtcNow;
+      cursor.LastWalFileSize = walFileSize;
+      cursor.LastParquetEntryCount = parquetEntryCount;
 
       UpdateCursor(cursor);
     }
@@ -123,30 +177,155 @@ public sealed class CursorManager
     return offset <= cursor.LastCompactedOffset; // Same file, check offset
   }
 
+  /// <summary>
+  /// Validates a cursor file and attempts recovery if needed.
+  /// </summary>
+  /// <param name="filePath">The cursor file path.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  /// <returns>A tuple containing the cursor and validation result.</returns>
+  public async Task<(CompactionCursor? Cursor, CursorValidationResult Result, CursorRecoveryInfo? RecoveryInfo)> ValidateAndLoadCursorAsync(
+      string filePath,
+      CancellationToken cancellationToken = default)
+  {
+    var (result, cursor) = await _validator.ValidateWithCrossCheckAsync(filePath, cancellationToken);
+
+    if (result == CursorValidationResult.Valid) {
+      return (cursor, result, null);
+    }
+
+    // Attempt recovery if enabled
+    if (_enableRecovery && _recoveryService != null && CursorValidator.CanRecover(result)) {
+      var stream = Path.GetFileNameWithoutExtension(filePath);
+      if (stream.EndsWith(".cursor")) {
+        stream = stream.Substring(0, stream.Length - 7);
+      }
+
+      var (success, recoveredCursor, info) = await _recoveryService.TryRecoverAsync(
+          stream, result, cursor, cancellationToken);
+
+      if (success && recoveredCursor != null) {
+        lock (_lock) {
+          _recoveryStats[stream] = info;
+        }
+
+        _logger?.LogWarning(
+            "Recovered cursor for stream {Stream} from {Result}: {Method}",
+            stream, result, info.RecoveryMethod);
+
+        return (recoveredCursor, result, info);
+      }
+    }
+
+    return (cursor, result, null);
+  }
+
   private void LoadCursors()
+  {
+    foreach (var file in Directory.GetFiles(_cursorDirectory, "*.cursor")) {
+      var stream = Path.GetFileNameWithoutExtension(file);
+      if (stream.EndsWith(".cursor")) {
+        stream = stream.Substring(0, stream.Length - 7);
+      }
+
+      try {
+        if (_enableValidation) {
+          // Use async validation in sync context
+          var (result, cursor) = _validator.ValidateAsync(file).GetAwaiter().GetResult();
+
+          if (result == CursorValidationResult.Valid && cursor != null) {
+            _cursors[cursor.Stream] = cursor;
+          } else if (_enableRecovery && _recoveryService != null && CursorValidator.CanRecover(result)) {
+            var (success, recoveredCursor, info) = _recoveryService.TryRecoverAsync(
+                stream, result, cursor).GetAwaiter().GetResult();
+
+            if (success && recoveredCursor != null) {
+              _cursors[recoveredCursor.Stream] = recoveredCursor;
+              _recoveryStats[stream] = info;
+
+              // Save the recovered cursor
+              SaveCursor(recoveredCursor);
+
+              _logger?.LogWarning(
+                  "Recovered cursor for stream {Stream} during startup: {Method}",
+                  stream, info.RecoveryMethod);
+            }
+          } else {
+            _logger?.LogWarning(
+                "Failed to load cursor for stream {Stream}: {Result}",
+                stream, result);
+          }
+        } else {
+          // Legacy loading without validation
+          var cursor = LoadLegacyCursor(file);
+          if (cursor != null) {
+            _cursors[cursor.Stream] = cursor;
+          }
+        }
+      } catch (Exception ex) {
+        _logger?.LogWarning(ex, "Failed to load cursor file {File}", file);
+      }
+    }
+
+    // Also check for old .cursor.json files and migrate them
+    MigrateOldCursorFiles();
+  }
+
+  private CompactionCursor? LoadLegacyCursor(string filePath)
+  {
+    try {
+      var json = File.ReadAllText(filePath);
+      return JsonSerializer.Deserialize<CompactionCursor>(json, JsonOptions);
+    } catch {
+      return null;
+    }
+  }
+
+  private void MigrateOldCursorFiles()
   {
     foreach (var file in Directory.GetFiles(_cursorDirectory, "*.cursor.json")) {
       try {
         var json = File.ReadAllText(file);
-        var cursor = JsonSerializer.Deserialize<CompactionCursor>(json);
+        var cursor = JsonSerializer.Deserialize<CompactionCursor>(json, JsonOptions);
 
         if (cursor != null) {
+          // Save in new format
+          SaveCursor(cursor);
           _cursors[cursor.Stream] = cursor;
+
+          // Remove old file
+          File.Delete(file);
+
+          _logger?.LogInformation(
+              "Migrated cursor file for stream {Stream} to new format",
+              cursor.Stream);
         }
-      } catch {
-        // Ignore corrupted cursor files
+      } catch (Exception ex) {
+        _logger?.LogWarning(ex, "Failed to migrate cursor file {File}", file);
       }
     }
   }
 
   private void SaveCursor(CompactionCursor cursor)
   {
-    var filePath = Path.Combine(_cursorDirectory, $"{cursor.Stream}.cursor.json");
-    var json = JsonSerializer.Serialize(cursor, new JsonSerializerOptions { WriteIndented = true });
+    var filePath = Path.Combine(_cursorDirectory, $"{cursor.Stream}.cursor");
+    var json = JsonSerializer.Serialize(cursor, JsonOptions);
+    var payload = System.Text.Encoding.UTF8.GetBytes(json);
+
+    // Create header with checksum
+    var header = CursorFileHeader.CreateForPayload(payload);
+
+    // Write header + payload
+    var fileBytes = new byte[CursorFileHeader.Size + payload.Length];
+    header.WriteTo(fileBytes);
+    Array.Copy(payload, 0, fileBytes, CursorFileHeader.Size, payload.Length);
 
     // Write to temp file first, then move for atomicity
     var tempPath = filePath + ".tmp";
-    File.WriteAllText(tempPath, json);
+    using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None)) {
+      fs.Write(fileBytes, 0, fileBytes.Length);
+      fs.Flush(true); // Ensure data is written to disk
+    }
+
     File.Move(tempPath, filePath, true);
   }
 }

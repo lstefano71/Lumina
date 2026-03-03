@@ -25,6 +25,18 @@ public class CompactionIntegrationTests : WalTestBase
     L1IntervalMinutes = 0
   };
 
+  private CursorManager CreateCursorManager(CompactionSettings settings)
+  {
+    var validator = new CursorValidator();
+    return new CursorManager(
+        settings.CursorDirectory,
+        validator,
+        recoveryService: null,
+        NullLogger<CursorManager>.Instance,
+        enableValidation: true,
+        enableRecovery: false);
+  }
+
   [Fact]
   public async Task CompactStream_ShouldCreateParquetFile()
   {
@@ -32,7 +44,7 @@ public class CompactionIntegrationTests : WalTestBase
     var compactionSettings = CreateCompactionSettings();
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
@@ -63,7 +75,7 @@ public class CompactionIntegrationTests : WalTestBase
     var compactionSettings = CreateCompactionSettings();
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
@@ -101,7 +113,7 @@ public class CompactionIntegrationTests : WalTestBase
     var compactionSettings = CreateCompactionSettings();
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
@@ -134,7 +146,7 @@ public class CompactionIntegrationTests : WalTestBase
     var compactionSettings = CreateCompactionSettings();
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
@@ -171,7 +183,7 @@ public class CompactionIntegrationTests : WalTestBase
     var compactionSettings = CreateCompactionSettings();
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
@@ -211,7 +223,7 @@ public class CompactionIntegrationTests : WalTestBase
     var compactionSettings = CreateCompactionSettings();
 
     await using var walManager = new WalManager(walSettings);
-    var cursorManager = new CursorManager(compactionSettings.CursorDirectory);
+    var cursorManager = CreateCursorManager(compactionSettings);
     var compactor = new L1Compactor(walManager, cursorManager, compactionSettings,
         NullLogger<L1Compactor>.Instance);
 
