@@ -85,3 +85,5 @@ yarn-error.log*
 # Ignore coverage and profiling outputs
 *.prof
 *.coverage
+/Lumina/data
+/Lumina/data-dev/test-stream
