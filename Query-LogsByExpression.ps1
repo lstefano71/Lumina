@@ -1,39 +1,41 @@
 <#
 .SYNOPSIS
-    Queries a Lumina stream and filters results with a SQL-like expression.
+    Queries a Lumina stream using a SQL-like WHERE expression (server-side pushdown).
 
 .DESCRIPTION
-    Fetches logs from /v1/query/logs/{stream} and applies a client-side filter expression.
+    Uses the revamped /v1/query/sql endpoint and executes SQL against stream views
+    registered by Lumina (e.g., stream "test-stream" is queryable as table "test-stream").
 
-    Supported expression operators:
-      - =, !=, >, >=, <, <=
-      - and, or, not
-      - null, true, false
+    The supplied -Expression is treated as a WHERE predicate. Common shorthand is supported:
+      - attr1 != null   -> attr1 IS NOT NULL
+      - attr1 = null    -> attr1 IS NULL
+      - attr1 <> null   -> attr1 IS NOT NULL
 
     Examples:
       .\Query-LogsByExpression.ps1 -Expression "attr1 != null"
       .\Query-LogsByExpression.ps1 -Expression "level = 'info' and attr2 != null"
+      .\Query-LogsByExpression.ps1 -Expression "TRY_CAST(split_part(version, '.', 1) AS INTEGER) > 1"
 
 .PARAMETER Expression
-    Filter expression to evaluate for each returned row.
+    SQL WHERE predicate expression.
 
 .PARAMETER Stream
-    The stream to query. Default: test-stream.
+    Stream/table name to query. Default: test-stream.
 
 .PARAMETER BaseUrl
-    The Lumina base URL. Default: http://localhost:5000.
+    Lumina base URL. Default: http://localhost:5000.
 
 .PARAMETER Limit
-    Max rows fetched from server before local filtering. Default: 1000.
+    SQL LIMIT value. Default: 1000.
 
 .PARAMETER StartDate
-    Optional start datetime (ISO sent to API).
+    Optional timestamp lower bound (timestamp >= StartDate).
 
 .PARAMETER EndDate
-    Optional end datetime (ISO sent to API).
+    Optional timestamp upper bound (timestamp <= EndDate).
 
 .PARAMETER Raw
-    Output only JSON result.
+    Output only JSON response from Lumina.
 #>
 
 [CmdletBinding()]
@@ -60,60 +62,46 @@ param(
     [switch]$Raw
 )
 
-function Convert-ExpressionToPowerShell {
+function Escape-SqlIdentifier {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        throw "Stream name cannot be empty."
+    }
+
+    if ($Name -match '^[A-Za-z_][A-Za-z0-9_]*$') {
+        return $Name
+    }
+
+    return '"' + $Name.Replace('"', '""') + '"'
+}
+
+function Escape-SqlString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return $Value.Replace("'", "''")
+}
+
+function Normalize-WhereExpression {
     param(
         [Parameter(Mandatory = $true)]
         [string]$InputExpression
     )
 
-    $expr = $InputExpression
+    $expr = $InputExpression.Trim()
 
-    # Protect string literals ('...') while rewriting identifiers/operators.
-    $stringLiterals = @{}
-    $matches = [regex]::Matches($expr, "'([^']|'')*'")
-    for ($i = $matches.Count - 1; $i -ge 0; $i--) {
-        $m = $matches[$i]
-        $key = "__STR$i`__"
-        $stringLiterals[$key] = $m.Value
-        $expr = $expr.Remove($m.Index, $m.Length).Insert($m.Index, $key)
+    if ([string]::IsNullOrWhiteSpace($expr)) {
+        throw "Expression cannot be empty."
     }
 
-    # SQL-like operators/keywords to PowerShell equivalents.
-    $expr = [regex]::Replace($expr, "\bAND\b", "-and", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $expr = [regex]::Replace($expr, "\bOR\b", "-or", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $expr = [regex]::Replace($expr, "\bNOT\b", "-not", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $expr = [regex]::Replace($expr, "\bNULL\b", "`$null", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $expr = [regex]::Replace($expr, "\bTRUE\b", "`$true", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $expr = [regex]::Replace($expr, "\bFALSE\b", "`$false", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-
-    # Comparison operators
-    $expr = $expr -replace "<>", " -ne "
-    $expr = $expr -replace "!=", " -ne "
-    $expr = $expr -replace "<=", " -le "
-    $expr = $expr -replace ">=", " -ge "
-    $expr = $expr -replace "(?<![<>!])=(?!=)", " -eq "
-    $expr = $expr -replace "(?<!-)>(?!=)", " -gt "
-    $expr = $expr -replace "(?<!-)<(?!=)", " -lt "
-
-    # Prefix bare identifiers as row fields: attr1 -> $_.attr1
-    $reserved = @(
-        'and','or','not',
-        'eq','ne','lt','le','gt','ge',
-        'true','false','null'
-    )
-
-    $expr = [regex]::Replace($expr, "\b[A-Za-z_][A-Za-z0-9_]*\b", {
-        param($m)
-        $token = $m.Value
-        if ($token -like "__STR*__") { return $token }
-        if ($reserved -contains $token.ToLowerInvariant()) { return $token }
-        if ($token.StartsWith("$")) { return $token }
-        return "`$_.${token}"
-    })
-
-    foreach ($key in $stringLiterals.Keys) {
-        $expr = $expr.Replace($key, $stringLiterals[$key])
-    }
+    $expr = [regex]::Replace($expr, '(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*(?:!=|<>)\s*null\b', '$1 IS NOT NULL')
+    $expr = [regex]::Replace($expr, '(?i)\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*null\b', '$1 IS NULL')
 
     return $expr
 }
@@ -126,37 +114,59 @@ try {
     exit 1
 }
 
-$queryPath = "/v1/query/logs/$([Uri]::EscapeDataString($Stream))"
-$queryUriBuilder = [UriBuilder]::new([Uri]::new($baseUri, $queryPath))
+if ($Limit -le 0) {
+    Write-Host "Limit must be greater than 0." -ForegroundColor Red
+    exit 1
+}
 
-$queryParams = @{}
-$queryParams["limit"] = $Limit
+try {
+    $streamTable = Escape-SqlIdentifier -Name $Stream
+    $whereExpr = Normalize-WhereExpression -InputExpression $Expression
+} catch {
+    Write-Host "Invalid input: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+
+$whereParts = [System.Collections.Generic.List[string]]::new()
+$whereParts.Add("($whereExpr)")
 
 if ($StartDate) {
-    $queryParams["start"] = $StartDate.ToString("o")
+    $startLiteral = Escape-SqlString -Value $StartDate.Value.ToString("yyyy-MM-dd HH:mm:ss.fffffff")
+    $whereParts.Add("timestamp >= TIMESTAMP '$startLiteral'")
 }
 
 if ($EndDate) {
-    $queryParams["end"] = $EndDate.ToString("o")
+    $endLiteral = Escape-SqlString -Value $EndDate.Value.ToString("yyyy-MM-dd HH:mm:ss.fffffff")
+    $whereParts.Add("timestamp <= TIMESTAMP '$endLiteral'")
 }
 
-$queryString = ($queryParams.GetEnumerator() | ForEach-Object { "$($_.Key)=$([Uri]::EscapeDataString([string]$_.Value))" }) -join "&"
-$queryUriBuilder.Query = $queryString
-$fullUrl = $queryUriBuilder.Uri.AbsoluteUri
+$whereClause = "WHERE " + ($whereParts -join " AND ")
 
-$psExpression = Convert-ExpressionToPowerShell -InputExpression $Expression
+$sql = @"
+SELECT *
+FROM $streamTable
+$whereClause
+ORDER BY timestamp DESC
+LIMIT $Limit
+"@
+
+$sqlUrl = "$normalizedBaseUrl/v1/query/sql"
 
 if (-not $Raw) {
-    Write-Host "Querying Lumina and applying expression filter..." -ForegroundColor Cyan
+    Write-Host "Querying Lumina with server-side SQL predicate..." -ForegroundColor Cyan
     Write-Host "Stream: $Stream" -ForegroundColor Gray
-    Write-Host "URL: $fullUrl" -ForegroundColor Gray
+    Write-Host "Endpoint: $sqlUrl" -ForegroundColor Gray
     Write-Host "Expression: $Expression" -ForegroundColor Gray
-    Write-Host "PowerShell filter: $psExpression" -ForegroundColor DarkGray
     Write-Host ""
 }
 
 try {
-    $response = Invoke-RestMethod -Uri $fullUrl -Method Get -ErrorAction Stop
+    $response = Invoke-RestMethod -Uri $sqlUrl -Method Post -ContentType "text/plain; charset=utf-8" -Body $sql -ErrorAction Stop
+
+    if ($Raw) {
+        $response | ConvertTo-Json -Depth 20
+        return
+    }
 
     $rows = @()
     if ($response.PSObject.Properties.Name -contains 'Rows') {
@@ -165,40 +175,40 @@ try {
         $rows = @($response.rows)
     }
 
-    $filterScript = [ScriptBlock]::Create($psExpression)
-    $filteredRows = @($rows | Where-Object $filterScript)
-
-    $columns = @()
-    if ($response.PSObject.Properties.Name -contains 'Columns') {
-        $columns = @($response.Columns)
-    } elseif ($response.PSObject.Properties.Name -contains 'columns') {
-        $columns = @($response.columns)
+    $rowCount = 0
+    if ($response.PSObject.Properties.Name -contains 'RowCount') {
+        $rowCount = [int]$response.RowCount
+    } elseif ($response.PSObject.Properties.Name -contains 'rowCount') {
+        $rowCount = [int]$response.rowCount
     }
 
-    $result = [pscustomobject]@{
-        Rows = $filteredRows
-        RowCount = $filteredRows.Count
-        Columns = $columns
-        Expression = $Expression
-        Stream = $Stream
-        SourceRowCount = $rows.Count
+    $executionMs = 0
+    if ($response.PSObject.Properties.Name -contains 'ExecutionTimeMs') {
+        $executionMs = [double]$response.ExecutionTimeMs
+    } elseif ($response.PSObject.Properties.Name -contains 'executionTimeMs') {
+        $executionMs = [double]$response.executionTimeMs
     }
 
-    if ($Raw) {
-        $result | ConvertTo-Json -Depth 20
-        return
+    $registeredStreams = @()
+    if ($response.PSObject.Properties.Name -contains 'RegisteredStreams') {
+        $registeredStreams = @($response.RegisteredStreams)
+    } elseif ($response.PSObject.Properties.Name -contains 'registeredStreams') {
+        $registeredStreams = @($response.registeredStreams)
     }
 
     Write-Host "Query Results:" -ForegroundColor Green
-    Write-Host "  Source rows:   $($rows.Count)" -ForegroundColor Gray
-    Write-Host "  Filtered rows: $($filteredRows.Count)" -ForegroundColor Gray
+    Write-Host "  Rows returned:   $rowCount" -ForegroundColor Gray
+    Write-Host "  Execution time:  $([Math]::Round($executionMs, 2)) ms" -ForegroundColor Gray
+    if ($registeredStreams.Count -gt 0) {
+        Write-Host "  Registered streams: $($registeredStreams -join ', ')" -ForegroundColor DarkGray
+    }
     Write-Host ""
 
-    if ($filteredRows.Count -gt 0) {
+    if ($rows.Count -gt 0) {
         Write-Host "Matching Log Entries:" -ForegroundColor Yellow
         Write-Host ("=" * 80) -ForegroundColor DarkGray
 
-        foreach ($row in $filteredRows) {
+        foreach ($row in $rows) {
             Write-Host ""
             Write-Host "  Timestamp: $($row.timestamp)" -ForegroundColor White
             Write-Host "  Level:     $($row.level)" -ForegroundColor Magenta
@@ -209,7 +219,7 @@ try {
         Write-Host "No entries matched the expression." -ForegroundColor Yellow
     }
 
-    return $result
+    return $response
 }
 catch {
     $statusCode = $null
@@ -242,10 +252,11 @@ catch {
             statusCode = $statusCode
             message = $errorMessage
             response = $responseBody
+            sql = $sql
         }
         $errorPayload | ConvertTo-Json -Depth 10 | Write-Error
     } else {
-        Write-Host "Error querying Lumina/expression:" -ForegroundColor Red
+        Write-Host "Error executing SQL query:" -ForegroundColor Red
         if ($statusCode) {
             Write-Host "  Status Code: $statusCode" -ForegroundColor Red
         }
@@ -253,6 +264,10 @@ catch {
         if ($responseBody) {
             Write-Host "  Response: $responseBody" -ForegroundColor DarkRed
         }
+
+        Write-Host "" 
+        Write-Host "SQL sent to Lumina:" -ForegroundColor DarkGray
+        Write-Host $sql -ForegroundColor DarkGray
     }
 
     exit 1
