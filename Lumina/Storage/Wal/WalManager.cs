@@ -13,6 +13,7 @@ public sealed class WalManager : IAsyncDisposable
   private readonly WalSettings _settings;
   private readonly ConcurrentDictionary<string, WalWriter> _writers = new();
   private readonly ConcurrentBag<WalWriter> _rotatedWriters = new();
+  private readonly ConcurrentDictionary<string, SemaphoreSlim> _streamLocks = new();
   private readonly string _baseDirectory;
   private bool _disposed;
 
@@ -52,16 +53,22 @@ public sealed class WalManager : IAsyncDisposable
       return existingWriter;
     }
 
-    // Create new writer
-    var filePath = GetWalPath(stream, DateTime.UtcNow);
-    var newWriter = await WalWriter.CreateAsync(filePath, stream, _settings, cancellationToken);
+    // Serialize creation per stream to prevent two threads from picking the same path
+    var streamLock = GetStreamLock(stream);
+    await streamLock.WaitAsync(cancellationToken);
+    try {
+      // Re-check inside the lock — another thread may have created the writer already
+      if (_writers.TryGetValue(stream, out existingWriter)) {
+        return existingWriter;
+      }
 
-    var actual = _writers.GetOrAdd(stream, newWriter);
-    if (actual != newWriter) {
-      // Another thread won the race; dispose our writer to avoid leaking file handles
-      await newWriter.DisposeAsync();
+      var filePath = GetWalPath(stream, DateTime.UtcNow);
+      var newWriter = await WalWriter.CreateAsync(filePath, stream, _settings, cancellationToken);
+      _writers[stream] = newWriter;
+      return newWriter;
+    } finally {
+      streamLock.Release();
     }
-    return actual;
   }
 
   /// <summary>
@@ -82,24 +89,39 @@ public sealed class WalManager : IAsyncDisposable
       return null;
     }
 
-    // Get the current file path before rotation
-    var oldPath = writer.FilePath;
+    // Serialize rotation per stream to prevent two threads from picking the same new path
+    var streamLock = GetStreamLock(stream);
+    await streamLock.WaitAsync(cancellationToken);
+    try {
+      // Re-read writer and re-check inside lock — another thread may have already rotated
+      if (!_writers.TryGetValue(stream, out writer)) {
+        return null;
+      }
 
-    // Create a new writer BEFORE swapping to avoid disposing one still in use
-    var newFilePath = GetWalPath(stream, DateTime.UtcNow);
-    var newWriter = await WalWriter.CreateAsync(newFilePath, stream, _settings, cancellationToken);
+      if (!writer.NeedsRotation()) {
+        return null;
+      }
 
-    // Atomic swap: only succeeds if the writer hasn't been rotated by another thread
-    if (_writers.TryUpdate(stream, newWriter, writer)) {
-      // Flush the old writer so all data is persisted, then defer its disposal
-      try { await writer.FlushAsync(); } catch (ObjectDisposedException) { }
-      _rotatedWriters.Add(writer);
-    } else {
-      // Another thread already rotated; dispose the writer we just created
-      await newWriter.DisposeAsync();
+      // Get the current file path before rotation
+      var oldPath = writer.FilePath;
+
+      // Create a new writer BEFORE swapping to avoid disposing one still in use
+      var newFilePath = GetWalPath(stream, DateTime.UtcNow);
+      var newWriter = await WalWriter.CreateAsync(newFilePath, stream, _settings, cancellationToken);
+
+      // Swap; inside the lock this always succeeds, but keep the guard for safety
+      if (_writers.TryUpdate(stream, newWriter, writer)) {
+        // Flush the old writer so all data is persisted, then defer its disposal
+        try { await writer.FlushAsync(); } catch (ObjectDisposedException) { }
+        _rotatedWriters.Add(writer);
+      } else {
+        await newWriter.DisposeAsync();
+      }
+
+      return oldPath;
+    } finally {
+      streamLock.Release();
     }
-
-    return oldPath;
   }
 
   /// <summary>
@@ -116,21 +138,32 @@ public sealed class WalManager : IAsyncDisposable
       return null;
     }
 
-    var oldPath = writer.FilePath;
+    // Serialize with the same per-stream lock to avoid conflicting with RotateWalIfNeededAsync
+    var streamLock = GetStreamLock(stream);
+    await streamLock.WaitAsync(cancellationToken);
+    try {
+      if (!_writers.TryGetValue(stream, out writer)) {
+        return null;
+      }
 
-    // Create a new writer BEFORE swapping
-    var newFilePath = GetWalPath(stream, DateTime.UtcNow);
-    var newWriter = await WalWriter.CreateAsync(newFilePath, stream, _settings, cancellationToken);
+      var oldPath = writer.FilePath;
 
-    if (_writers.TryUpdate(stream, newWriter, writer)) {
-      // Force rotate is an explicit operation; dispose the old writer immediately
-      // so its file handle is released and the file can be deleted by compaction.
-      await writer.DisposeAsync();
-    } else {
-      await newWriter.DisposeAsync();
+      // Create a new writer BEFORE swapping
+      var newFilePath = GetWalPath(stream, DateTime.UtcNow);
+      var newWriter = await WalWriter.CreateAsync(newFilePath, stream, _settings, cancellationToken);
+
+      if (_writers.TryUpdate(stream, newWriter, writer)) {
+        // Force rotate is an explicit operation; dispose the old writer immediately
+        // so its file handle is released and the file can be deleted by compaction.
+        await writer.DisposeAsync();
+      } else {
+        await newWriter.DisposeAsync();
+      }
+
+      return oldPath;
+    } finally {
+      streamLock.Release();
     }
-
-    return oldPath;
   }
 
   /// <summary>
@@ -284,6 +317,14 @@ public sealed class WalManager : IAsyncDisposable
   }
 
   /// <summary>
+  /// Gets or creates a per-stream semaphore used to serialize file creation and rotation.
+  /// </summary>
+  private SemaphoreSlim GetStreamLock(string stream)
+  {
+    return _streamLocks.GetOrAdd(stream, _ => new SemaphoreSlim(1, 1));
+  }
+
+  /// <summary>
   /// Gets the stream directory path.
   /// </summary>
   private string GetStreamDirectory(string stream)
@@ -354,6 +395,11 @@ public sealed class WalManager : IAsyncDisposable
     // Dispose rotated writers that were kept alive for in-flight writes
     while (_rotatedWriters.TryTake(out var old)) {
       await old.DisposeAsync();
+    }
+
+    // Dispose per-stream semaphores
+    foreach (var sem in _streamLocks.Values) {
+      sem.Dispose();
     }
   }
 }
