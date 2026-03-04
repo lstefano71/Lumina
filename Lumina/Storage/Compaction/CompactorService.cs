@@ -1,15 +1,19 @@
 using Lumina.Core.Configuration;
+using Lumina.Query;
 
 namespace Lumina.Storage.Compaction;
 
 /// <summary>
 /// Background service that runs periodic WAL → Parquet compaction (L1)
-/// and daily consolidation (L2).
+/// and calendar-based consolidation (L2).
+/// Triggers a DuckDB view refresh whenever files change so queries
+/// always see the latest catalog state.
 /// </summary>
 public sealed class CompactorService : BackgroundService
 {
   private readonly L1Compactor _l1Compactor;
   private readonly CompactionPipeline _compactionPipeline;
+  private readonly DuckDbQueryService _queryService;
   private readonly CompactionSettings _settings;
   private readonly ILogger<CompactorService> _logger;
   private readonly IHostApplicationLifetime _lifetime;
@@ -18,12 +22,14 @@ public sealed class CompactorService : BackgroundService
   public CompactorService(
       L1Compactor l1Compactor,
       CompactionPipeline compactionPipeline,
+      DuckDbQueryService queryService,
       CompactionSettings settings,
       ILogger<CompactorService> logger,
       IHostApplicationLifetime lifetime)
   {
     _l1Compactor = l1Compactor;
     _compactionPipeline = compactionPipeline;
+    _queryService = queryService;
     _settings = settings;
     _logger = logger;
     _lifetime = lifetime;
@@ -61,11 +67,13 @@ public sealed class CompactorService : BackgroundService
   private async Task RunCompactionAsync(CancellationToken cancellationToken)
   {
     _logger.LogDebug("Starting compaction run");
+    var filesChanged = false;
 
     // Run L1 compaction (WAL → Parquet)
     var entriesCompacted = await _l1Compactor.CompactAllAsync(cancellationToken);
 
     if (entriesCompacted > 0) {
+      filesChanged = true;
       _logger.LogInformation("L1 compaction complete: {Count} entries compacted", entriesCompacted);
     } else {
       _logger.LogDebug("L1 compaction complete: no entries to compact");
@@ -81,6 +89,7 @@ public sealed class CompactorService : BackgroundService
       _lastL2Run = DateTime.UtcNow;
 
       if (filesConsolidated > 0) {
+        filesChanged = true;
         _logger.LogInformation("Compaction pipeline complete: {Count} files consolidated", filesConsolidated);
       } else {
         _logger.LogDebug("Compaction pipeline complete: no files to consolidate");
@@ -89,6 +98,16 @@ public sealed class CompactorService : BackgroundService
       _logger.LogDebug(
           "Skipping compaction pipeline (next run in {Remaining})",
           l2Interval - timeSinceLastL2);
+    }
+
+    // Refresh DuckDB views so queries see the updated file set immediately
+    if (filesChanged) {
+      try {
+        await _queryService.RefreshStreamsAsync(cancellationToken);
+        _logger.LogDebug("DuckDB views refreshed after compaction");
+      } catch (Exception ex) {
+        _logger.LogWarning(ex, "Failed to refresh DuckDB views after compaction");
+      }
     }
   }
 }

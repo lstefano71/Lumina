@@ -19,7 +19,7 @@ public class StreamTableMappingTests
     var sql = mapping.GetCreateViewSql();
 
     // Assert
-    Assert.Contains("CREATE VIEW IF NOT EXISTS my_stream", sql);
+    Assert.Contains("CREATE OR REPLACE VIEW my_stream", sql);
     Assert.Contains("read_parquet([", sql);
     Assert.Contains("file1.parquet", sql);
     Assert.Contains("file2.parquet", sql);
@@ -39,7 +39,7 @@ public class StreamTableMappingTests
     var sql = mapping.GetCreateViewSql();
 
     // Assert
-    Assert.Contains("CREATE VIEW IF NOT EXISTS empty_stream", sql);
+    Assert.Contains("CREATE OR REPLACE VIEW empty_stream", sql);
     Assert.Contains("SELECT NULL LIMIT 0", sql);
   }
 

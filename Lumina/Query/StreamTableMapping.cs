@@ -25,13 +25,13 @@ public sealed class StreamTableMapping
     var files = ParquetFiles;
     if (files.Count == 0) {
       // Create an empty view with no rows
-      return $"CREATE VIEW IF NOT EXISTS {GetViewName(schema)} AS SELECT * FROM (SELECT NULL LIMIT 0)";
+      return $"CREATE OR REPLACE VIEW {GetViewName(schema)} AS SELECT * FROM (SELECT NULL LIMIT 0)";
     }
 
     var fileList = string.Join(", ", files.Select(f => $"'{EscapeSqlString(f)}'"));
     var viewName = GetViewName(schema);
 
-    return $"CREATE VIEW IF NOT EXISTS {viewName} AS SELECT * FROM read_parquet([{fileList}], union_by_name=true)";
+    return $"CREATE OR REPLACE VIEW {viewName} AS SELECT * FROM read_parquet([{fileList}], union_by_name=true)";
   }
 
   /// <summary>
