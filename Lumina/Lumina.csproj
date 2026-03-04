@@ -24,5 +24,6 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="*" />
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="*-*" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="*" />
+    <PackageReference Include="Serilog.AspNetCore" Version="*" />
   </ItemGroup>
 </Project>

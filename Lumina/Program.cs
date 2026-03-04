@@ -11,8 +11,26 @@ using Lumina.Storage.Compaction;
 using Lumina.Storage.Wal;
 
 using OpenTelemetry.Metrics;
+using Serilog;
+using Serilog.Sinks.SystemConsole.Themes;
+
+// Bootstrap logger: captures startup messages before the DI container is ready.
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console(
+        outputTemplate: "[{Timestamp:yyyy-MM-ddTHH:mm:ss.fffK}] [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}",
+        theme: AnsiConsoleTheme.Code)
+    .CreateBootstrapLogger();
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Replace the default Microsoft.Extensions.Logging console provider with Serilog.
+builder.Host.UseSerilog((context, services, cfg) => cfg
+    .ReadFrom.Configuration(context.Configuration)
+    .ReadFrom.Services(services)
+    .Enrich.FromLogContext()
+    .WriteTo.Console(
+        outputTemplate: "[{Timestamp:yyyy-MM-ddTHH:mm:ss.fffK}] [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}",
+        theme: AnsiConsoleTheme.Code));
 
 // Bind configuration
 builder.Services.Configure<LuminaSettings>(
@@ -206,4 +224,15 @@ app.MapGet("/ready", () => Results.Ok(new {
   timestamp = DateTime.UtcNow
 }));
 
-app.Run();
+try
+{
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
