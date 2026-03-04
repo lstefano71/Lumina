@@ -110,9 +110,13 @@ public sealed class L2Compactor
     var outputDir = Path.Combine(_settings.L2Directory, stream);
     var outputFileName = $"{stream}_{date:yyyyMMdd}_consolidated.parquet";
     var outputPath = Path.GetFullPath(Path.Combine(outputDir, outputFileName));
+    var tmpOutputPath = outputPath + ".tmp";
 
-    // Write consolidated file
-    await ParquetWriter.WriteBatchAsync(entries, outputPath, _settings.MaxDynamicKeys, cancellationToken);
+    // Write consolidated file to a temporary location
+    await ParquetWriter.WriteBatchAsync(entries, tmpOutputPath, _settings.MaxDynamicKeys, cancellationToken);
+    
+    // Atomically move to final path
+    File.Move(tmpOutputPath, outputPath, overwrite: true);
 
     // Get file info for catalog registration
     var fileInfo = new FileInfo(outputPath);
