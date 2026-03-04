@@ -1,26 +1,51 @@
 using Lumina.Core.Configuration;
+using Lumina.Storage.Catalog;
 
 namespace Lumina.Query;
 
 /// <summary>
 /// Manages Parquet file discovery and organization.
+/// Uses the Stream Catalog for consistent file visibility.
 /// </summary>
 public sealed class ParquetManager
 {
   private readonly CompactionSettings _settings;
+  private readonly CatalogManager? _catalogManager;
   private readonly ILogger<ParquetManager> _logger;
 
-  public ParquetManager(CompactionSettings settings, ILogger<ParquetManager> logger)
+  public ParquetManager(
+      CompactionSettings settings,
+      ILogger<ParquetManager> logger,
+      CatalogManager? catalogManager = null)
   {
     _settings = settings;
     _logger = logger;
+    _catalogManager = catalogManager;
   }
 
   /// <summary>
-  /// Discovers all unique stream names from L1 and L2 directories.
+  /// Discovers all unique stream names from catalog or filesystem.
+  /// Uses catalog when available for consistent visibility.
   /// </summary>
   /// <returns>List of unique stream names.</returns>
   public IReadOnlyList<string> DiscoverAllStreams()
+  {
+    // Use catalog if available
+    if (_catalogManager != null) {
+      var streams = _catalogManager.GetStreams();
+      _logger.LogDebug("Discovered {Count} streams from catalog", streams.Count);
+      return streams;
+    }
+
+    // Fallback to filesystem scanning
+    return DiscoverStreamsFromFilesystem();
+  }
+
+  /// <summary>
+  /// Discovers streams by scanning filesystem directories.
+  /// Used as fallback when catalog is not available.
+  /// </summary>
+  internal IReadOnlyList<string> DiscoverStreamsFromFilesystem()
   {
     var streams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -44,7 +69,7 @@ public sealed class ParquetManager
       }
     }
 
-    _logger.LogDebug("Discovered {Count} streams from L1/L2 directories", streams.Count);
+    _logger.LogDebug("Discovered {Count} streams from filesystem", streams.Count);
     return streams.OrderBy(s => s).ToList();
   }
 
@@ -188,30 +213,45 @@ public sealed class ParquetManager
   }
 
   /// <summary>
-  /// Gets all L1 Parquet files.
+  /// Gets all L1 Parquet files from catalog or filesystem.
   /// </summary>
   /// <returns>List of file paths.</returns>
   public IReadOnlyList<string> GetL1Files()
   {
+    if (_catalogManager != null) {
+      var entries = _catalogManager.GetEntries(level: StorageLevel.L1);
+      return entries.Select(e => e.FilePath).OrderBy(f => f).ToList();
+    }
+
     return GetParquetFiles(_settings.L1Directory);
   }
 
   /// <summary>
-  /// Gets all L2 Parquet files.
+  /// Gets all L2 Parquet files from catalog or filesystem.
   /// </summary>
   /// <returns>List of file paths.</returns>
   public IReadOnlyList<string> GetL2Files()
   {
+    if (_catalogManager != null) {
+      var entries = _catalogManager.GetEntries(level: StorageLevel.L2);
+      return entries.Select(e => e.FilePath).OrderBy(f => f).ToList();
+    }
+
     return GetParquetFiles(_settings.L2Directory);
   }
 
   /// <summary>
-  /// Gets all Parquet files for a specific stream.
+  /// Gets all Parquet files for a specific stream from catalog or filesystem.
   /// </summary>
   /// <param name="stream">The stream name.</param>
   /// <returns>List of file paths.</returns>
   public IReadOnlyList<string> GetStreamFiles(string stream)
   {
+    if (_catalogManager != null) {
+      return _catalogManager.GetFiles(stream);
+    }
+
+    // Fallback to filesystem
     var files = new List<string>();
 
     // L1 files
@@ -261,11 +301,16 @@ public sealed class ParquetManager
   }
 
   /// <summary>
-  /// Gets the total size of Parquet files.
+  /// Gets the total size of Parquet files from catalog or filesystem.
   /// </summary>
   /// <returns>Total size in bytes.</returns>
   public long GetTotalSize()
   {
+    if (_catalogManager != null) {
+      return _catalogManager.GetTotalSize();
+    }
+
+    // Fallback to filesystem
     long total = 0;
 
     if (Directory.Exists(_settings.L1Directory)) {

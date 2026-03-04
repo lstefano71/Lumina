@@ -1,5 +1,6 @@
 using Lumina.Core.Configuration;
 using Lumina.Core.Models;
+using Lumina.Storage.Catalog;
 using Lumina.Storage.Parquet;
 using Lumina.Storage.Wal;
 
@@ -14,18 +15,21 @@ public sealed class L1Compactor
   private readonly WalManager _walManager;
   private readonly CursorManager _cursorManager;
   private readonly CompactionSettings _settings;
+  private readonly CatalogManager? _catalogManager;
   private readonly ILogger<L1Compactor> _logger;
 
   public L1Compactor(
       WalManager walManager,
       CursorManager cursorManager,
       CompactionSettings settings,
-      ILogger<L1Compactor> logger)
+      ILogger<L1Compactor> logger,
+      CatalogManager? catalogManager = null)
   {
     _walManager = walManager;
     _cursorManager = cursorManager;
     _settings = settings;
     _logger = logger;
+    _catalogManager = catalogManager;
   }
 
   /// <summary>
@@ -117,6 +121,23 @@ public sealed class L1Compactor
     try {
       // Write Parquet file
       await ParquetWriter.WriteBatchAsync(entries, outputPath, _settings.MaxDynamicKeys, cancellationToken);
+
+      // Get file info for catalog registration
+      var fileInfo = new FileInfo(outputPath);
+
+      // Register file in catalog (before cursor update for atomicity)
+      if (_catalogManager != null) {
+        var catalogEntry = new CatalogEntry {
+          StreamName = stream,
+          Date = startTime.Date,
+          FilePath = outputPath,
+          Level = StorageLevel.L1,
+          RowCount = entries.Count,
+          FileSizeBytes = fileInfo.Length,
+          AddedAt = DateTime.UtcNow
+        };
+        await _catalogManager.AddFileAsync(catalogEntry, cancellationToken);
+      }
 
       // Update cursor with validation metadata
       _cursorManager.MarkCompactionComplete(

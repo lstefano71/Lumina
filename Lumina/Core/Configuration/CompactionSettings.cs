@@ -39,13 +39,13 @@ public sealed class CompactionSettings
   /// Gets the L1 output directory for Parquet files.
   /// Default is "data/l1".
   /// </summary>
-  public string L1Directory { get; init; } = "data/l1";
+  public string L1Directory { get; init; } = "data/L1";
 
   /// <summary>
   /// Gets the L2 output directory for daily consolidated Parquet files.
   /// Default is "data/l2".
   /// </summary>
-  public string L2Directory { get; init; } = "data/l2";
+  public string L2Directory { get; init; } = "data/L2";
 
   /// <summary>
   /// Gets the L1 window duration for time-based compaction.
@@ -87,4 +87,24 @@ public sealed class CompactionSettings
   /// Default is false.
   /// </summary>
   public bool StrictValidationMode { get; init; } = false;
+
+  // --- Catalog settings ---
+
+  /// <summary>
+  /// Gets the directory where the stream catalog is stored.
+  /// Default is "data/catalog".
+  /// </summary>
+  public string CatalogDirectory { get; init; } = "data/catalog";
+
+  /// <summary>
+  /// Gets a value indicating whether to rebuild catalog on startup if corrupted.
+  /// Default is true.
+  /// </summary>
+  public bool EnableCatalogAutoRebuild { get; init; } = true;
+
+  /// <summary>
+  /// Gets a value indicating whether to run garbage collection on startup.
+  /// Default is true.
+  /// </summary>
+  public bool EnableCatalogStartupGc { get; init; } = true;
 }

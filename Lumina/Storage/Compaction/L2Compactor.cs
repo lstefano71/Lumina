@@ -1,6 +1,7 @@
 using Lumina.Core.Configuration;
 using Lumina.Core.Models;
 using Lumina.Query;
+using Lumina.Storage.Catalog;
 using Lumina.Storage.Parquet;
 
 namespace Lumina.Storage.Compaction;
@@ -8,21 +9,25 @@ namespace Lumina.Storage.Compaction;
 /// <summary>
 /// L2 Compactor consolidates daily L1 Parquet files into compressed L2 files.
 /// Uses ZSTD compression for long-term storage efficiency.
+/// Implements atomic commit pattern to prevent duplicate rows during compaction.
 /// </summary>
 public sealed class L2Compactor
 {
   private readonly CompactionSettings _settings;
   private readonly ParquetManager _parquetManager;
+  private readonly CatalogManager? _catalogManager;
   private readonly ILogger<L2Compactor> _logger;
 
   public L2Compactor(
       CompactionSettings settings,
       ParquetManager parquetManager,
-      ILogger<L2Compactor> logger)
+      ILogger<L2Compactor> logger,
+      CatalogManager? catalogManager = null)
   {
     _settings = settings;
     _parquetManager = parquetManager;
     _logger = logger;
+    _catalogManager = catalogManager;
   }
 
   /// <summary>
@@ -79,6 +84,7 @@ public sealed class L2Compactor
 
   /// <summary>
   /// Consolidates L1 files for a single day into an L2 file.
+  /// Implements atomic commit: write L2 → update catalog → delete L1.
   /// </summary>
   private async Task ConsolidateDayAsync(
       string stream,
@@ -103,16 +109,34 @@ public sealed class L2Compactor
     // Generate L2 output path
     var outputDir = Path.Combine(_settings.L2Directory, stream);
     var outputFileName = $"{stream}_{date:yyyyMMdd}_consolidated.parquet";
-    var outputPath = Path.Combine(outputDir, outputFileName);
+    var outputPath = Path.GetFullPath(Path.Combine(outputDir, outputFileName));
 
     // Write consolidated file
     await ParquetWriter.WriteBatchAsync(entries, outputPath, _settings.MaxDynamicKeys, cancellationToken);
 
-    _logger.LogInformation(
-        "Consolidated {Count} entries from {Files} files into {Output}",
-        entries.Count, l1Files.Count, outputFileName);
+    // Get file info for catalog registration
+    var fileInfo = new FileInfo(outputPath);
 
-    // Delete old L1 files
+    // ATOMIC COMMIT: Update catalog before deleting L1 files
+    // This prevents duplicate rows during the transition window
+    if (_catalogManager != null) {
+      var l2Entry = new CatalogEntry {
+        StreamName = stream,
+        Date = date,
+        FilePath = outputPath,
+        Level = StorageLevel.L2,
+        RowCount = entries.Count,
+        FileSizeBytes = fileInfo.Length,
+        AddedAt = DateTime.UtcNow
+      };
+
+      await _catalogManager.ReplaceFilesAsync(l1Files, l2Entry, cancellationToken);
+      _logger.LogInformation(
+          "Atomic commit: replaced {L1Count} L1 files with L2 file {Output} for {Stream}/{Date}",
+          l1Files.Count, outputFileName, stream, date);
+    }
+
+    // Delete old L1 files AFTER catalog update
     foreach (var file in l1Files) {
       try {
         File.Delete(file);
@@ -121,12 +145,16 @@ public sealed class L2Compactor
         _logger.LogWarning(ex, "Failed to delete L1 file: {File}", file);
       }
     }
+
+    _logger.LogInformation(
+        "Consolidated {Count} entries from {Files} files into {Output}",
+        entries.Count, l1Files.Count, outputFileName);
   }
 
   /// <summary>
   /// Parses file info from a Parquet file path.
   /// </summary>
-  private static FileInfo? ParseFileInfo(string filePath)
+  private static ParsedFileInfo? ParseFileInfo(string filePath)
   {
     var fileName = Path.GetFileNameWithoutExtension(filePath);
     var parts = fileName.Split('_');
@@ -147,10 +175,10 @@ public sealed class L2Compactor
       }
     }
 
-    return new FileInfo { Stream = stream, Date = date.Date };
+    return new ParsedFileInfo { Stream = stream, Date = date.Date };
   }
 
-  private sealed class FileInfo
+  private sealed class ParsedFileInfo
   {
     public required string Stream { get; init; }
     public required DateTime Date { get; init; }

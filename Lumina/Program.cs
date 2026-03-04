@@ -6,6 +6,7 @@ using Lumina.Ingestion.Endpoints;
 using Lumina.Observability;
 using Lumina.Query;
 using Lumina.Query.Endpoints;
+using Lumina.Storage.Catalog;
 using Lumina.Storage.Compaction;
 using Lumina.Storage.Wal;
 
@@ -72,18 +73,34 @@ builder.Services.AddSingleton<CursorManager>(sp => {
       settings.EnableCursorRecovery);
 });
 
+// Register catalog services
+builder.Services.AddSingleton<CatalogOptions>(sp => {
+  var settings = sp.GetRequiredService<CompactionSettings>();
+  return new CatalogOptions {
+    CatalogDirectory = settings.CatalogDirectory,
+    EnableAutoRebuild = settings.EnableCatalogAutoRebuild,
+    EnableStartupGc = settings.EnableCatalogStartupGc
+  };
+});
+
+builder.Services.AddSingleton<CatalogManager>();
+builder.Services.AddSingleton<CatalogRebuilder>();
+builder.Services.AddSingleton<CatalogGarbageCollector>();
+
 builder.Services.AddSingleton<L1Compactor>(sp => {
   var walManager = sp.GetRequiredService<WalManager>();
   var cursorManager = sp.GetRequiredService<CursorManager>();
   var settings = sp.GetRequiredService<CompactionSettings>();
   var logger = sp.GetRequiredService<ILogger<L1Compactor>>();
-  return new L1Compactor(walManager, cursorManager, settings, logger);
+  var catalogManager = sp.GetRequiredService<CatalogManager>();
+  return new L1Compactor(walManager, cursorManager, settings, logger, catalogManager);
 });
 
 builder.Services.AddSingleton<ParquetManager>(sp => {
   var settings = sp.GetRequiredService<CompactionSettings>();
   var logger = sp.GetRequiredService<ILogger<ParquetManager>>();
-  return new ParquetManager(settings, logger);
+  var catalogManager = sp.GetRequiredService<CatalogManager>();
+  return new ParquetManager(settings, logger, catalogManager);
 });
 
 builder.Services.AddSingleton<DuckDbQueryService>(sp => {
@@ -106,6 +123,41 @@ builder.Services.AddHostedService<CompactorService>();
 builder.Services.AddHostedService<StreamDiscoveryService>();
 
 var app = builder.Build();
+
+// Initialize catalog
+var catalogManager = app.Services.GetRequiredService<CatalogManager>();
+var catalogOptions = app.Services.GetRequiredService<CatalogOptions>();
+var compactionSettings = app.Services.GetRequiredService<CompactionSettings>();
+var catalogRebuilder = app.Services.GetRequiredService<CatalogRebuilder>();
+var catalogGc = app.Services.GetRequiredService<CatalogGarbageCollector>();
+
+await catalogManager.InitializeAsync();
+
+// Check if catalog is empty and needs rebuilding
+var catalogSnapshot = catalogManager.GetCatalogSnapshot();
+if (catalogSnapshot.Entries.Count == 0 &&
+    (Directory.Exists(compactionSettings.L1Directory) || Directory.Exists(compactionSettings.L2Directory))) {
+  var logger = app.Services.GetRequiredService<ILogger<Program>>();
+  logger.LogInformation("Catalog is empty, attempting rebuild from disk");
+
+  var rebuiltCatalog = await catalogRebuilder.RecoverFromDiskAsync(
+      compactionSettings.L1Directory,
+      compactionSettings.L2Directory);
+
+  if (rebuiltCatalog.Entries.Count > 0) {
+    await catalogManager.ReloadFromStateAsync(rebuiltCatalog);
+    logger.LogInformation("Catalog rebuilt with {Count} entries", rebuiltCatalog.Entries.Count);
+  }
+}
+
+// Run startup garbage collection if enabled
+if (catalogOptions.EnableStartupGc) {
+  catalogSnapshot = catalogManager.GetCatalogSnapshot();
+  await catalogGc.RunGcAsync(
+      catalogSnapshot,
+      compactionSettings.L1Directory,
+      compactionSettings.L2Directory);
+}
 
 // Initialize DuckDB
 var queryService = app.Services.GetRequiredService<DuckDbQueryService>();
