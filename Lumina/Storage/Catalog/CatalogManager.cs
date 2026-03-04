@@ -282,18 +282,31 @@ public sealed class CatalogManager : IDisposable
   }
 
   /// <summary>
-  /// Gets entries eligible for daily L2 compaction (L1 files with MaxTime before cutoff).
+  /// Gets catalog entries for a stream matching the given storage level and compaction tier.
+  /// This is the generic eligibility query used by <see cref="Compaction.ICompactionTier"/> implementations.
   /// </summary>
   /// <param name="stream">The stream name.</param>
-  /// <param name="cutoffDate">The cutoff date (files with MaxTime before this are eligible).</param>
-  /// <returns>List of catalog entries eligible for compaction.</returns>
-  public IReadOnlyList<CatalogEntry> GetEligibleForDailyCompaction(string stream, DateTime cutoffDate)
+  /// <param name="level">Required <see cref="StorageLevel"/>.</param>
+  /// <param name="compactionTier">Required <see cref="CatalogEntry.CompactionTier"/> value.</param>
+  /// <returns>Matching entries ordered by <see cref="CatalogEntry.MinTime"/>.</returns>
+  public IReadOnlyList<CatalogEntry> GetEligibleEntries(
+      string stream, StorageLevel level, int compactionTier)
   {
     return _catalog.Entries
         .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
-        .Where(e => e.Level == StorageLevel.L1)
-        .Where(e => e.MaxTime < cutoffDate)
+        .Where(e => e.Level == level)
+        .Where(e => e.CompactionTier == compactionTier)
         .OrderBy(e => e.MinTime)
+        .ToList();
+  }
+
+  /// <summary>
+  /// Gets entries eligible for daily L2 compaction (L1 files with MaxTime before cutoff).
+  /// </summary>
+  public IReadOnlyList<CatalogEntry> GetEligibleForDailyCompaction(string stream, DateTime cutoffDate)
+  {
+    return GetEligibleEntries(stream, StorageLevel.L1, compactionTier: 1)
+        .Where(e => e.MaxTime < cutoffDate)
         .ToList();
   }
 
@@ -301,37 +314,22 @@ public sealed class CatalogManager : IDisposable
   /// Gets all daily-tier L2 entries eligible for monthly consolidation.
   /// Returns only entries with CompactionTier == 2 (daily files, not already monthly).
   /// </summary>
-  /// <param name="stream">The stream name.</param>
-  /// <returns>List of daily L2 catalog entries.</returns>
   public IReadOnlyList<CatalogEntry> GetEligibleForMonthlyCompaction(string stream)
   {
-    return _catalog.Entries
-        .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
-        .Where(e => e.Level == StorageLevel.L2)
-        .Where(e => e.CompactionTier == 2)
-        .OrderBy(e => e.MinTime)
-        .ToList();
+    return GetEligibleEntries(stream, StorageLevel.L2, compactionTier: 2);
   }
 
   /// <summary>
   /// Gets entries eligible for monthly consolidation within a specific month.
   /// Returns only daily-tier entries (CompactionTier == 2).
   /// </summary>
-  /// <param name="stream">The stream name.</param>
-  /// <param name="year">The year.</param>
-  /// <param name="month">The month (1-12).</param>
-  /// <returns>List of catalog entries within the specified month.</returns>
   public IReadOnlyList<CatalogEntry> GetEligibleForMonthlyCompaction(string stream, int year, int month)
   {
     var monthStart = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
     var monthEnd = monthStart.AddMonths(1);
 
-    return _catalog.Entries
-        .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
-        .Where(e => e.Level == StorageLevel.L2)
-        .Where(e => e.CompactionTier == 2)
+    return GetEligibleEntries(stream, StorageLevel.L2, compactionTier: 2)
         .Where(e => e.MinTime >= monthStart && e.MaxTime < monthEnd)
-        .OrderBy(e => e.MinTime)
         .ToList();
   }
 

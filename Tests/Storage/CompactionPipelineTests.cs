@@ -2,12 +2,10 @@ using FluentAssertions;
 
 using Lumina.Core.Configuration;
 using Lumina.Core.Models;
-using Lumina.Query;
 using Lumina.Storage.Catalog;
 using Lumina.Storage.Compaction;
 using Lumina.Storage.Parquet;
 
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using Xunit;
@@ -15,9 +13,9 @@ using Xunit;
 namespace Lumina.Tests.Storage;
 
 /// <summary>
-/// Tests for N-tier calendar-based L2 compaction (daily + monthly).
+/// Tests for the N-tier calendar-based compaction pipeline (daily + monthly).
 /// </summary>
-public sealed class L2CompactorTests : IDisposable
+public sealed class CompactionPipelineTests : IDisposable
 {
   private readonly string _testDirectory;
   private readonly string _l1Directory;
@@ -26,9 +24,9 @@ public sealed class L2CompactorTests : IDisposable
   private readonly CompactionSettings _settings;
   private readonly CatalogManager _catalogManager;
 
-  public L2CompactorTests()
+  public CompactionPipelineTests()
   {
-    _testDirectory = Path.Combine(Path.GetTempPath(), $"l2_compactor_test_{Guid.NewGuid():N}");
+    _testDirectory = Path.Combine(Path.GetTempPath(), $"compaction_pipeline_test_{Guid.NewGuid():N}");
     _l1Directory = Path.Combine(_testDirectory, "l1");
     _l2Directory = Path.Combine(_testDirectory, "l2");
     _catalogDirectory = Path.Combine(_testDirectory, "catalog");
@@ -105,22 +103,118 @@ public sealed class L2CompactorTests : IDisposable
     return path;
   }
 
-  private L2Compactor CreateCompactor()
+  /// <summary>Creates a pipeline with only the specified tiers.</summary>
+  private CompactionPipeline CreatePipeline(params ICompactionTier[] tiers)
   {
-    var parquetManager = new ParquetManager(
+    return new CompactionPipeline(
         _settings,
-        NullLogger<ParquetManager>.Instance,
-        _catalogManager);
+        _catalogManager,
+        tiers,
+        NullLogger<CompactionPipeline>.Instance);
+  }
 
-    return new L2Compactor(
-        _settings,
-        parquetManager,
-        NullLogger<L2Compactor>.Instance,
-        _catalogManager);
+  /// <summary>Creates a pipeline with Daily + Monthly (default).</summary>
+  private CompactionPipeline CreateDefaultPipeline()
+      => CreatePipeline(new DailyCompactionTier(), new MonthlyCompactionTier());
+
+  // -----------------------------------------------------------------------
+  //  ICompactionTier unit tests — pure functions
+  // -----------------------------------------------------------------------
+
+  [Fact]
+  public void DailyTier_Properties_AreCorrect()
+  {
+    var tier = new DailyCompactionTier();
+    tier.Order.Should().Be(1);
+    tier.Name.Should().Be("Daily");
+    tier.InputLevel.Should().Be(StorageLevel.L1);
+    tier.InputCompactionTier.Should().Be(1);
+    tier.OutputCompactionTier.Should().Be(2);
+    tier.MinGroupSize.Should().Be(1);
+  }
+
+  [Fact]
+  public void MonthlyTier_Properties_AreCorrect()
+  {
+    var tier = new MonthlyCompactionTier();
+    tier.Order.Should().Be(2);
+    tier.Name.Should().Be("Monthly");
+    tier.InputLevel.Should().Be(StorageLevel.L2);
+    tier.InputCompactionTier.Should().Be(2);
+    tier.OutputCompactionTier.Should().Be(3);
+    tier.MinGroupSize.Should().Be(2);
+  }
+
+  [Fact]
+  public void DailyTier_GroupEntries_GroupsByDay()
+  {
+    var tier = new DailyCompactionTier();
+    var entries = new List<CatalogEntry> {
+      new() { StreamName = "s", FilePath = "a", MinTime = new(2024, 1, 10, 8, 0, 0, DateTimeKind.Utc) },
+      new() { StreamName = "s", FilePath = "b", MinTime = new(2024, 1, 10, 14, 0, 0, DateTimeKind.Utc) },
+      new() { StreamName = "s", FilePath = "c", MinTime = new(2024, 1, 11, 2, 0, 0, DateTimeKind.Utc) },
+    };
+
+    var groups = tier.GroupEntries(entries).ToList();
+    groups.Should().HaveCount(2);
+    groups.Select(g => g.Key).Should().BeEquivalentTo(["20240110", "20240111"]);
+    groups.First(g => g.Key == "20240110").Should().HaveCount(2);
+  }
+
+  [Fact]
+  public void MonthlyTier_GroupEntries_GroupsByMonth()
+  {
+    var tier = new MonthlyCompactionTier();
+    var entries = new List<CatalogEntry> {
+      new() { StreamName = "s", FilePath = "a", MinTime = new(2024, 1, 5, 0, 0, 0, DateTimeKind.Utc) },
+      new() { StreamName = "s", FilePath = "b", MinTime = new(2024, 1, 20, 0, 0, 0, DateTimeKind.Utc) },
+      new() { StreamName = "s", FilePath = "c", MinTime = new(2024, 2, 1, 0, 0, 0, DateTimeKind.Utc) },
+    };
+
+    var groups = tier.GroupEntries(entries).ToList();
+    groups.Should().HaveCount(2);
+    groups.Select(g => g.Key).Should().BeEquivalentTo(["202401", "202402"]);
+    groups.First(g => g.Key == "202401").Should().HaveCount(2);
+  }
+
+  [Fact]
+  public void DailyTier_IsGroupClosed_ReturnsTrueForYesterday()
+  {
+    var tier = new DailyCompactionTier();
+    var yesterday = DateTime.UtcNow.Date.AddDays(-1).ToString("yyyyMMdd");
+    var today = DateTime.UtcNow.Date.ToString("yyyyMMdd");
+
+    tier.IsGroupClosed(yesterday).Should().BeTrue();
+    tier.IsGroupClosed(today).Should().BeFalse();
+  }
+
+  [Fact]
+  public void MonthlyTier_IsGroupClosed_ReturnsTrueForLastMonth()
+  {
+    var tier = new MonthlyCompactionTier();
+    var closedKey = "202401"; // well in the past
+    var currentKey = $"{DateTime.UtcNow:yyyyMM}";
+
+    tier.IsGroupClosed(closedKey).Should().BeTrue();
+    tier.IsGroupClosed(currentKey).Should().BeFalse();
+  }
+
+  [Fact]
+  public void DailyTier_GetOutputFileName_MatchesConvention()
+  {
+    var tier = new DailyCompactionTier();
+    tier.GetOutputFileName("my-stream", "20240110").Should().Be("my-stream_20240110.parquet");
+  }
+
+  [Fact]
+  public void MonthlyTier_GetOutputFileName_MatchesConvention()
+  {
+    var tier = new MonthlyCompactionTier();
+    tier.GetOutputFileName("my-stream", "202401").Should().Be("my-stream_202401.parquet");
   }
 
   // -----------------------------------------------------------------------
-  //  Phase 1 — Daily compaction
+  //  Pipeline — Daily compaction
   // -----------------------------------------------------------------------
 
   [Fact]
@@ -129,27 +223,23 @@ public sealed class L2CompactorTests : IDisposable
     var stream = "daily-test";
     var yesterday = DateTime.UtcNow.Date.AddDays(-1).AddHours(10);
 
-    // Write 3 L1 files for yesterday
     await WriteL1ParquetAsync(stream, yesterday, 5);
     await WriteL1ParquetAsync(stream, yesterday.AddHours(1), 5);
     await WriteL1ParquetAsync(stream, yesterday.AddHours(2), 5);
 
-    var compactor = CreateCompactor();
-    var count = await compactor.CompactStreamDailyAsync(stream);
+    var pipeline = CreatePipeline(new DailyCompactionTier());
+    var count = await pipeline.CompactAllAsync();
 
     count.Should().Be(3);
 
-    // Verify daily L2 file was created
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(1);
     l2Entries[0].CompactionTier.Should().Be(2);
     l2Entries[0].RowCount.Should().Be(15);
 
-    // Verify filename convention: stream_yyyyMMdd.parquet
     var fileName = Path.GetFileName(l2Entries[0].FilePath);
     fileName.Should().MatchRegex(@"^daily-test_\d{8}\.parquet$");
 
-    // L1 entries should be gone from catalog
     var l1Entries = _catalogManager.GetEntries(stream, StorageLevel.L1);
     l1Entries.Should().BeEmpty();
   }
@@ -158,16 +248,15 @@ public sealed class L2CompactorTests : IDisposable
   public async Task DailyCompaction_ShouldNotCompactToday()
   {
     var stream = "today-test";
-    var today = DateTime.UtcNow.Date.AddHours(2); // earlier today
+    var today = DateTime.UtcNow.Date.AddHours(2);
 
     await WriteL1ParquetAsync(stream, today, 5);
 
-    var compactor = CreateCompactor();
-    var count = await compactor.CompactStreamDailyAsync(stream);
+    var pipeline = CreatePipeline(new DailyCompactionTier());
+    var count = await pipeline.CompactAllAsync();
 
     count.Should().Be(0);
 
-    // L1 entries should still be present
     var l1Entries = _catalogManager.GetEntries(stream, StorageLevel.L1);
     l1Entries.Should().HaveCount(1);
   }
@@ -182,8 +271,8 @@ public sealed class L2CompactorTests : IDisposable
     await WriteL1ParquetAsync(stream, twoDaysAgo, 3);
     await WriteL1ParquetAsync(stream, yesterday, 7);
 
-    var compactor = CreateCompactor();
-    var count = await compactor.CompactStreamDailyAsync(stream);
+    var pipeline = CreatePipeline(new DailyCompactionTier());
+    var count = await pipeline.CompactAllAsync();
 
     count.Should().Be(2);
 
@@ -193,16 +282,13 @@ public sealed class L2CompactorTests : IDisposable
   }
 
   // -----------------------------------------------------------------------
-  //  Phase 2 — Monthly compaction
+  //  Pipeline — Monthly compaction
   // -----------------------------------------------------------------------
 
   [Fact]
   public async Task MonthlyCompaction_ShouldMergeDailyFilesFromClosedMonth()
   {
     var stream = "monthly-test";
-
-    // Create daily L2 files for a month that is definitely closed
-    // Use January 2024 which is well in the past
     var baseDate = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     var streamDir = Path.Combine(_l2Directory, stream);
     Directory.CreateDirectory(streamDir);
@@ -235,18 +321,16 @@ public sealed class L2CompactorTests : IDisposable
       });
     }
 
-    var compactor = CreateCompactor();
-    var count = await compactor.CompactStreamMonthlyAsync(stream);
+    var pipeline = CreatePipeline(new MonthlyCompactionTier());
+    var count = await pipeline.CompactAllAsync();
 
     count.Should().Be(3);
 
-    // Verify monthly L2 file was created
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(1);
     l2Entries[0].CompactionTier.Should().Be(3);
     l2Entries[0].RowCount.Should().Be(30);
 
-    // Verify filename convention: stream_yyyyMM.parquet
     var fileName2 = Path.GetFileName(l2Entries[0].FilePath);
     fileName2.Should().Be("monthly-test_202401.parquet");
   }
@@ -260,7 +344,6 @@ public sealed class L2CompactorTests : IDisposable
     var streamDir = Path.Combine(_l2Directory, stream);
     Directory.CreateDirectory(streamDir);
 
-    // create 2 daily L2 files for current month
     for (int day = 0; day < 2; day++) {
       var dayDate = thisMonth.AddDays(day);
       var entries = Enumerable.Range(0, 5).Select(i => new LogEntry {
@@ -288,12 +371,11 @@ public sealed class L2CompactorTests : IDisposable
       });
     }
 
-    var compactor = CreateCompactor();
-    var count = await compactor.CompactStreamMonthlyAsync(stream);
+    var pipeline = CreatePipeline(new MonthlyCompactionTier());
+    var count = await pipeline.CompactAllAsync();
 
     count.Should().Be(0);
 
-    // Daily files should remain untouched
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(2);
     l2Entries.Should().AllSatisfy(e => e.CompactionTier.Should().Be(2));
@@ -303,8 +385,6 @@ public sealed class L2CompactorTests : IDisposable
   public async Task MonthlyCompaction_ShouldNotRecompactMonthlyFiles()
   {
     var stream = "no-recompact";
-
-    // Simulate an already-compacted monthly file (CompactionTier == 3)
     var streamDir = Path.Combine(_l2Directory, stream);
     Directory.CreateDirectory(streamDir);
 
@@ -331,8 +411,8 @@ public sealed class L2CompactorTests : IDisposable
       CompactionTier = 3
     });
 
-    var compactor = CreateCompactor();
-    var count = await compactor.CompactStreamMonthlyAsync(stream);
+    var pipeline = CreatePipeline(new MonthlyCompactionTier());
+    var count = await pipeline.CompactAllAsync();
 
     count.Should().Be(0);
   }
@@ -346,7 +426,6 @@ public sealed class L2CompactorTests : IDisposable
   {
     var stream = "full-pipeline";
 
-    // Write L1 files for multiple days across a closed month (e.g., Jan 2024)
     var jan1 = new DateTime(2024, 1, 10, 8, 0, 0, DateTimeKind.Utc);
     var jan2 = new DateTime(2024, 1, 20, 14, 0, 0, DateTimeKind.Utc);
     var jan3 = new DateTime(2024, 1, 25, 20, 0, 0, DateTimeKind.Utc);
@@ -355,20 +434,18 @@ public sealed class L2CompactorTests : IDisposable
     await WriteL1ParquetAsync(stream, jan2, 5);
     await WriteL1ParquetAsync(stream, jan3, 5);
 
-    var compactor = CreateCompactor();
+    var pipeline = CreateDefaultPipeline();
 
-    // Single CompactAllAsync call chains daily → monthly in one pass:
+    // Single CompactAllAsync chains daily → monthly in one pass:
     //   L1 files → daily L2 (3 files) → monthly L2 (1 file)
-    var result = await compactor.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
     result.Should().BeGreaterThan(0);
 
-    // After the full pipeline: should have one monthly file (CompactionTier == 3)
     var allL2 = _catalogManager.GetEntries(stream, StorageLevel.L2);
     allL2.Should().HaveCount(1);
     allL2[0].CompactionTier.Should().Be(3);
     allL2[0].RowCount.Should().Be(15);
 
-    // L1 entries should be gone
     var l1Entries = _catalogManager.GetEntries(stream, StorageLevel.L1);
     l1Entries.Should().BeEmpty();
   }
@@ -376,18 +453,91 @@ public sealed class L2CompactorTests : IDisposable
   [Fact]
   public async Task CompactAll_WithNoCatalog_ShouldReturnZero()
   {
-    var parquetManager = new ParquetManager(
+    var pipeline = new CompactionPipeline(
         _settings,
-        NullLogger<ParquetManager>.Instance,
-        _catalogManager);
+        catalogManager: null,
+        new ICompactionTier[] { new DailyCompactionTier(), new MonthlyCompactionTier() },
+        NullLogger<CompactionPipeline>.Instance);
 
-    var compactor = new L2Compactor(
-        _settings,
-        parquetManager,
-        NullLogger<L2Compactor>.Instance,
-        catalogManager: null);
-
-    var count = await compactor.CompactAllAsync();
+    var count = await pipeline.CompactAllAsync();
     count.Should().Be(0);
+  }
+
+  // -----------------------------------------------------------------------
+  //  Tier ordering — ensures pipeline respects ICompactionTier.Order
+  // -----------------------------------------------------------------------
+
+  [Fact]
+  public async Task Pipeline_ShouldRespectTierOrdering()
+  {
+    // Register monthly before daily — pipeline should still run daily first
+    var pipeline = CreatePipeline(new MonthlyCompactionTier(), new DailyCompactionTier());
+
+    var stream = "order-test";
+    var jan1 = new DateTime(2024, 1, 10, 8, 0, 0, DateTimeKind.Utc);
+    var jan2 = new DateTime(2024, 1, 20, 14, 0, 0, DateTimeKind.Utc);
+    var jan3 = new DateTime(2024, 1, 25, 20, 0, 0, DateTimeKind.Utc);
+
+    await WriteL1ParquetAsync(stream, jan1, 5);
+    await WriteL1ParquetAsync(stream, jan2, 5);
+    await WriteL1ParquetAsync(stream, jan3, 5);
+
+    var result = await pipeline.CompactAllAsync();
+    result.Should().BeGreaterThan(0);
+
+    // Daily ran first → monthly consumed the daily files → one monthly file
+    var allL2 = _catalogManager.GetEntries(stream, StorageLevel.L2);
+    allL2.Should().HaveCount(1);
+    allL2[0].CompactionTier.Should().Be(3);
+  }
+
+  // -----------------------------------------------------------------------
+  //  CatalogManager.GetEligibleEntries — generic method
+  // -----------------------------------------------------------------------
+
+  [Fact]
+  public async Task GetEligibleEntries_FiltersCorrectly()
+  {
+    var stream = "eligible-test";
+
+    // L1 tier-1 file
+    await WriteL1ParquetAsync(stream, DateTime.UtcNow.Date.AddDays(-1), 3);
+
+    // L2 tier-2 file
+    var streamDir = Path.Combine(_l2Directory, stream);
+    Directory.CreateDirectory(streamDir);
+    var dailyEntries = Enumerable.Range(0, 5).Select(i => new LogEntry {
+      Stream = stream,
+      Timestamp = new DateTime(2024, 3, 1, 0, 0, 0, DateTimeKind.Utc).AddHours(i),
+      Level = "info",
+      Message = $"msg-{i}",
+      Attributes = new Dictionary<string, object?>()
+    }).ToList();
+
+    var dailyPath = Path.Combine(streamDir, $"{stream}_20240301.parquet");
+    await ParquetWriter.WriteBatchAsync(dailyEntries, dailyPath, 100);
+    await _catalogManager.AddFileAsync(new CatalogEntry {
+      StreamName = stream,
+      MinTime = dailyEntries.Min(e => e.Timestamp),
+      MaxTime = dailyEntries.Max(e => e.Timestamp),
+      FilePath = dailyPath,
+      Level = StorageLevel.L2,
+      RowCount = dailyEntries.Count,
+      FileSizeBytes = new FileInfo(dailyPath).Length,
+      AddedAt = DateTime.UtcNow,
+      CompactionTier = 2
+    });
+
+    // Generic query for L1/tier-1
+    var l1Entries = _catalogManager.GetEligibleEntries(stream, StorageLevel.L1, 1);
+    l1Entries.Should().HaveCount(1);
+
+    // Generic query for L2/tier-2
+    var l2Entries = _catalogManager.GetEligibleEntries(stream, StorageLevel.L2, 2);
+    l2Entries.Should().HaveCount(1);
+
+    // Generic query for L2/tier-3 — should be empty
+    var l3Entries = _catalogManager.GetEligibleEntries(stream, StorageLevel.L2, 3);
+    l3Entries.Should().BeEmpty();
   }
 }

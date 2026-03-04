@@ -9,7 +9,7 @@ namespace Lumina.Storage.Compaction;
 public sealed class CompactorService : BackgroundService
 {
   private readonly L1Compactor _l1Compactor;
-  private readonly L2Compactor _l2Compactor;
+  private readonly CompactionPipeline _compactionPipeline;
   private readonly CompactionSettings _settings;
   private readonly ILogger<CompactorService> _logger;
   private readonly IHostApplicationLifetime _lifetime;
@@ -17,13 +17,13 @@ public sealed class CompactorService : BackgroundService
 
   public CompactorService(
       L1Compactor l1Compactor,
-      L2Compactor l2Compactor,
+      CompactionPipeline compactionPipeline,
       CompactionSettings settings,
       ILogger<CompactorService> logger,
       IHostApplicationLifetime lifetime)
   {
     _l1Compactor = l1Compactor;
-    _l2Compactor = l2Compactor;
+    _compactionPipeline = compactionPipeline;
     _settings = settings;
     _logger = logger;
     _lifetime = lifetime;
@@ -71,23 +71,23 @@ public sealed class CompactorService : BackgroundService
       _logger.LogDebug("L1 compaction complete: no entries to compact");
     }
 
-    // Run L2 compaction (daily consolidation) if interval has elapsed
+    // Run compaction pipeline (daily → monthly → …) if interval has elapsed
     var l2Interval = TimeSpan.FromHours(_settings.L2IntervalHours);
     var timeSinceLastL2 = DateTime.UtcNow - _lastL2Run;
 
     if (timeSinceLastL2 >= l2Interval) {
-      _logger.LogInformation("Starting L2 compaction (daily consolidation)");
-      var filesConsolidated = await _l2Compactor.CompactAllAsync(cancellationToken);
+      _logger.LogInformation("Starting compaction pipeline");
+      var filesConsolidated = await _compactionPipeline.CompactAllAsync(cancellationToken);
       _lastL2Run = DateTime.UtcNow;
 
       if (filesConsolidated > 0) {
-        _logger.LogInformation("L2 compaction complete: {Count} files consolidated", filesConsolidated);
+        _logger.LogInformation("Compaction pipeline complete: {Count} files consolidated", filesConsolidated);
       } else {
-        _logger.LogDebug("L2 compaction complete: no files to consolidate");
+        _logger.LogDebug("Compaction pipeline complete: no files to consolidate");
       }
     } else {
       _logger.LogDebug(
-          "Skipping L2 compaction (next run in {Remaining})",
+          "Skipping compaction pipeline (next run in {Remaining})",
           l2Interval - timeSinceLastL2);
     }
   }
