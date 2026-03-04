@@ -50,9 +50,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     var entry = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "test.parquet"),
       Level = StorageLevel.L1,
       RowCount = 100,
@@ -75,9 +77,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     var entry = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "test.parquet"),
       Level = StorageLevel.L1,
       RowCount = 100,
@@ -98,10 +102,12 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     // Add initial L1 files
     var l1Entry1 = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-2),
+      MaxTime = now.AddHours(-1),
       FilePath = Path.Combine(_testDirectory, "l1_1.parquet"),
       Level = StorageLevel.L1,
       RowCount = 50,
@@ -111,7 +117,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     var l1Entry2 = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "l1_2.parquet"),
       Level = StorageLevel.L1,
       RowCount = 50,
@@ -125,7 +132,8 @@ public sealed class CatalogManagerTests : IDisposable
     // Replace with L2 file
     var l2Entry = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-2),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "l2_consolidated.parquet"),
       Level = StorageLevel.L2,
       RowCount = 100,
@@ -149,9 +157,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     var entry = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "test.parquet"),
       Level = StorageLevel.L1,
       RowCount = 100,
@@ -172,9 +182,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream-a",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "a.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -184,7 +196,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream-b",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "b.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -194,7 +207,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream-a",
-      Date = DateTime.UtcNow.Date.AddDays(-1),
+      MinTime = now.AddDays(-1).AddHours(-1),
+      MaxTime = now.AddDays(-1),
       FilePath = Path.Combine(_testDirectory, "a2.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -214,9 +228,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream-a",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "a1.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -226,7 +242,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream-a",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-2),
+      MaxTime = now.AddHours(-1),
       FilePath = Path.Combine(_testDirectory, "a2.parquet"),
       Level = StorageLevel.L2,
       RowCount = 10,
@@ -236,7 +253,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream-b",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "b.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -254,9 +272,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "l1.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -266,7 +286,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-2),
+      MaxTime = now.AddHours(-1),
       FilePath = Path.Combine(_testDirectory, "l2.parquet"),
       Level = StorageLevel.L2,
       RowCount = 10,
@@ -289,9 +310,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "a.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -301,7 +324,8 @@ public sealed class CatalogManagerTests : IDisposable
 
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-2),
+      MaxTime = now.AddHours(-1),
       FilePath = Path.Combine(_testDirectory, "b.parquet"),
       Level = StorageLevel.L1,
       RowCount = 10,
@@ -319,9 +343,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     var entry = new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "test.parquet"),
       Level = StorageLevel.L1,
       RowCount = 100,
@@ -343,13 +369,15 @@ public sealed class CatalogManagerTests : IDisposable
   [Fact]
   public async Task InitializeAsync_ShouldLoadExistingCatalog()
   {
+    var now = DateTime.UtcNow;
     // Create initial catalog
     var manager1 = new CatalogManager(_options, _logger);
     await manager1.InitializeAsync();
 
     await manager1.AddFileAsync(new CatalogEntry {
       StreamName = "test-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "test.parquet"),
       Level = StorageLevel.L1,
       RowCount = 100,
@@ -372,9 +400,11 @@ public sealed class CatalogManagerTests : IDisposable
     var manager = new CatalogManager(_options, _logger);
     await manager.InitializeAsync();
 
+    var now = DateTime.UtcNow;
     await manager.AddFileAsync(new CatalogEntry {
       StreamName = "old-stream",
-      Date = DateTime.UtcNow.Date,
+      MinTime = now.AddHours(-1),
+      MaxTime = now,
       FilePath = Path.Combine(_testDirectory, "old.parquet"),
       Level = StorageLevel.L1,
       RowCount = 100,
@@ -388,7 +418,8 @@ public sealed class CatalogManagerTests : IDisposable
                 new()
                 {
                     StreamName = "new-stream",
-                    Date = DateTime.UtcNow.Date,
+                    MinTime = now.AddHours(-1),
+                    MaxTime = now,
                     FilePath = Path.Combine(_testDirectory, "new.parquet"),
                     Level = StorageLevel.L2,
                     RowCount = 200,
@@ -406,5 +437,104 @@ public sealed class CatalogManagerTests : IDisposable
     Assert.Single(entries);
     Assert.Equal("new-stream", entries[0].StreamName);
     Assert.Equal(StorageLevel.L2, entries[0].Level);
+  }
+
+  [Fact]
+  public async Task GetFilesInRange_ShouldReturnOverlappingFiles()
+  {
+    var manager = new CatalogManager(_options, _logger);
+    await manager.InitializeAsync();
+
+    var baseTime = new DateTime(2024, 1, 15, 12, 0, 0, DateTimeKind.Utc);
+
+    // File 1: 10:00 - 11:00
+    await manager.AddFileAsync(new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime.AddHours(-2),
+      MaxTime = baseTime.AddHours(-1),
+      FilePath = Path.Combine(_testDirectory, "file1.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 10,
+      FileSizeBytes = 100,
+      AddedAt = DateTime.UtcNow
+    });
+
+    // File 2: 11:00 - 12:00
+    await manager.AddFileAsync(new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime.AddHours(-1),
+      MaxTime = baseTime,
+      FilePath = Path.Combine(_testDirectory, "file2.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 10,
+      FileSizeBytes = 100,
+      AddedAt = DateTime.UtcNow
+    });
+
+    // File 3: 12:00 - 13:00
+    await manager.AddFileAsync(new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime,
+      MaxTime = baseTime.AddHours(1),
+      FilePath = Path.Combine(_testDirectory, "file3.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 10,
+      FileSizeBytes = 100,
+      AddedAt = DateTime.UtcNow
+    });
+
+    // Query: 11:30 - 12:30 (should match File 2 and File 3)
+    var entries = manager.GetFilesInRange("test-stream", baseTime.AddMinutes(-30), baseTime.AddMinutes(30));
+    Assert.Equal(2, entries.Count);
+  }
+
+  [Fact]
+  public async Task GetEligibleForDailyCompaction_ShouldReturnL1FilesBeforeCutoff()
+  {
+    var manager = new CatalogManager(_options, _logger);
+    await manager.InitializeAsync();
+
+    var now = DateTime.UtcNow;
+    var yesterday = now.AddDays(-1);
+
+    // L1 file from yesterday (eligible)
+    await manager.AddFileAsync(new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = yesterday.AddHours(-2),
+      MaxTime = yesterday,
+      FilePath = Path.Combine(_testDirectory, "eligible.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 10,
+      FileSizeBytes = 100,
+      AddedAt = DateTime.UtcNow
+    });
+
+    // L1 file from today (not eligible)
+    await manager.AddFileAsync(new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = now.AddHours(-2),
+      MaxTime = now,
+      FilePath = Path.Combine(_testDirectory, "not_eligible.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 10,
+      FileSizeBytes = 100,
+      AddedAt = DateTime.UtcNow
+    });
+
+    // L2 file from yesterday (not eligible - wrong level)
+    await manager.AddFileAsync(new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = yesterday.AddHours(-2),
+      MaxTime = yesterday,
+      FilePath = Path.Combine(_testDirectory, "l2_file.parquet"),
+      Level = StorageLevel.L2,
+      RowCount = 10,
+      FileSizeBytes = 100,
+      AddedAt = DateTime.UtcNow
+    });
+
+    var eligible = manager.GetEligibleForDailyCompaction("test-stream", now.Date);
+    Assert.Single(eligible);
+    Assert.Equal("eligible.parquet", Path.GetFileName(eligible[0].FilePath));
   }
 }

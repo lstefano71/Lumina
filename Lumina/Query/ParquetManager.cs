@@ -276,24 +276,29 @@ public sealed class ParquetManager
   /// <param name="start">Start time.</param>
   /// <param name="end">End time.</param>
   /// <returns>List of file paths.</returns>
-  public IReadOnlyList<string> GetFilesInRange(string stream, DateTime start, DateTime end)
+  public async Task<IReadOnlyList<string>> GetFilesInRangeAsync(string stream, DateTime start, DateTime end, CancellationToken cancellationToken = default)
   {
+    // Use catalog time-range query if available
+    if (_catalogManager != null) {
+      var entries = _catalogManager.GetFilesInRange(stream, start, end);
+      return entries.Select(e => e.FilePath).ToList();
+    }
+
+    // Fallback to metadata parsing when catalog is not available
     var files = GetStreamFiles(stream);
     var result = new List<string>();
 
     foreach (var file in files) {
-      // Parse timestamps from filename (format: stream_start_end.parquet)
-      var fileName = Path.GetFileNameWithoutExtension(file);
-      var parts = fileName.Split('_');
-
-      if (parts.Length >= 3) {
-        // Try to parse start time from filename
-        if (DateTime.TryParseExact(parts[1], "yyyyMMdd HHmmss", null,
-            System.Globalization.DateTimeStyles.None, out var fileStart)) {
-          if (fileStart <= end && fileStart >= start.AddHours(-1)) {
-            result.Add(file);
-          }
+      // Use efficient Parquet metadata statistics instead of parsing filename strings
+      var bounds = await Lumina.Storage.Parquet.ParquetStatisticsReader.ExtractTimeBoundsAsync(file, cancellationToken);
+      if (bounds.HasValue) {
+        if (bounds.Value.MinTime <= end && bounds.Value.MaxTime >= start) {
+          result.Add(file);
         }
+      } else {
+        // Fallback: If no stats available (e.g. no _t), still return the file
+        // so we don't accidentally miss data.
+        result.Add(file);
       }
     }
 

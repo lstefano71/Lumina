@@ -15,10 +15,16 @@ public sealed class CatalogEntry
   public required string StreamName { get; init; }
 
   /// <summary>
-  /// Gets the date (UTC) this file covers. Used for L2 compaction grouping.
+  /// Gets the minimum timestamp in this file (from _t column statistics).
   /// </summary>
-  [JsonPropertyName("date")]
-  public DateTime Date { get; init; }
+  [JsonPropertyName("minTime")]
+  public DateTime MinTime { get; init; }
+
+  /// <summary>
+  /// Gets the maximum timestamp in this file (from _t column statistics).
+  /// </summary>
+  [JsonPropertyName("maxTime")]
+  public DateTime MaxTime { get; init; }
 
   /// <summary>
   /// Gets the absolute file path.
@@ -49,6 +55,12 @@ public sealed class CatalogEntry
   /// </summary>
   [JsonPropertyName("addedAt")]
   public DateTime AddedAt { get; init; }
+
+  /// <summary>
+  /// Gets the compaction tier (for future L3+ support).
+  /// </summary>
+  [JsonPropertyName("compactionTier")]
+  public int CompactionTier { get; init; } = 1;
 }
 
 /// <summary>

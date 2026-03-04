@@ -129,12 +129,14 @@ public sealed class L1Compactor
       if (_catalogManager != null) {
         var catalogEntry = new CatalogEntry {
           StreamName = stream,
-          Date = startTime.Date,
+          MinTime = startTime,
+          MaxTime = endTime,
           FilePath = outputPath,
           Level = StorageLevel.L1,
           RowCount = entries.Count,
           FileSizeBytes = fileInfo.Length,
-          AddedAt = DateTime.UtcNow
+          AddedAt = DateTime.UtcNow,
+          CompactionTier = 1
         };
         await _catalogManager.AddFileAsync(catalogEntry, cancellationToken);
       }

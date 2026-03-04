@@ -247,6 +247,77 @@ public sealed class CatalogManager : IDisposable
   }
 
   /// <summary>
+  /// Gets files that overlap with the specified time range.
+  /// </summary>
+  /// <param name="stream">The stream name.</param>
+  /// <param name="start">Start of the time range.</param>
+  /// <param name="end">End of the time range.</param>
+  /// <returns>List of catalog entries overlapping the time range.</returns>
+  public IReadOnlyList<CatalogEntry> GetFilesInRange(string stream, DateTime start, DateTime end)
+  {
+    return _catalog.Entries
+        .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
+        .Where(e => e.MinTime <= end && e.MaxTime >= start)
+        .OrderBy(e => e.MinTime)
+        .ToList();
+  }
+
+  /// <summary>
+  /// Gets all entries within a time range across all streams.
+  /// </summary>
+  /// <param name="start">Start of the time range.</param>
+  /// <param name="end">End of the time range.</param>
+  /// <param name="level">Optional storage level filter.</param>
+  /// <returns>List of catalog entries overlapping the time range.</returns>
+  public IReadOnlyList<CatalogEntry> GetEntriesByTimeRange(DateTime start, DateTime end, StorageLevel? level = null)
+  {
+    var entries = _catalog.Entries
+        .Where(e => e.MinTime <= end && e.MaxTime >= start);
+
+    if (level.HasValue) {
+      entries = entries.Where(e => e.Level == level.Value);
+    }
+
+    return entries.OrderBy(e => e.MinTime).ToList();
+  }
+
+  /// <summary>
+  /// Gets entries eligible for daily L2 compaction (L1 files with MaxTime before cutoff).
+  /// </summary>
+  /// <param name="stream">The stream name.</param>
+  /// <param name="cutoffDate">The cutoff date (files with MaxTime before this are eligible).</param>
+  /// <returns>List of catalog entries eligible for compaction.</returns>
+  public IReadOnlyList<CatalogEntry> GetEligibleForDailyCompaction(string stream, DateTime cutoffDate)
+  {
+    return _catalog.Entries
+        .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
+        .Where(e => e.Level == StorageLevel.L1)
+        .Where(e => e.MaxTime < cutoffDate)
+        .OrderBy(e => e.MinTime)
+        .ToList();
+  }
+
+  /// <summary>
+  /// Gets entries eligible for monthly consolidation.
+  /// </summary>
+  /// <param name="stream">The stream name.</param>
+  /// <param name="year">The year.</param>
+  /// <param name="month">The month (1-12).</param>
+  /// <returns>List of catalog entries within the specified month.</returns>
+  public IReadOnlyList<CatalogEntry> GetEligibleForMonthlyCompaction(string stream, int year, int month)
+  {
+    var monthStart = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
+    var monthEnd = monthStart.AddMonths(1);
+
+    return _catalog.Entries
+        .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
+        .Where(e => e.Level == StorageLevel.L2)
+        .Where(e => e.MinTime >= monthStart && e.MaxTime < monthEnd)
+        .OrderBy(e => e.MinTime)
+        .ToList();
+  }
+
+  /// <summary>
   /// Gets the total size of all files in the catalog.
   /// </summary>
   /// <returns>Total size in bytes.</returns>

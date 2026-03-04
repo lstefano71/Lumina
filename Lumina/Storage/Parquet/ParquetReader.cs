@@ -12,7 +12,7 @@ namespace Lumina.Storage.Parquet;
 public static class ParquetReader
 {
   private static readonly HashSet<string> FixedColumns =
-      new() { "stream", "timestamp", "level", "message", "trace_id", "span_id", "duration_ms", "_meta" };
+      new() { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms", "_meta" };
 
   /// <summary>
   /// Reads all log entries from a Parquet file.
@@ -52,7 +52,7 @@ public static class ParquetReader
 
         var entry = new LogEntry {
           Stream = GetString(columns, "stream", i) ?? "unknown",
-          Timestamp = GetDateTime(columns, "timestamp", i) ?? DateTime.UtcNow,
+          Timestamp = GetDateTime(columns, "_t", i) ?? DateTime.UtcNow,
           Level = GetString(columns, "level", i) ?? "info",
           Message = GetString(columns, "message", i) ?? "",
           TraceId = GetString(columns, "trace_id", i),

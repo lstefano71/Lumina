@@ -10,6 +10,7 @@ namespace Lumina.Storage.Compaction;
 /// L2 Compactor consolidates daily L1 Parquet files into compressed L2 files.
 /// Uses ZSTD compression for long-term storage efficiency.
 /// Implements atomic commit pattern to prevent duplicate rows during compaction.
+/// Uses catalog time-range queries instead of filename parsing.
 /// </summary>
 public sealed class L2Compactor
 {
@@ -37,45 +38,82 @@ public sealed class L2Compactor
   /// <returns>The number of files consolidated.</returns>
   public async Task<int> CompactAllAsync(CancellationToken cancellationToken = default)
   {
-    var l1Files = _parquetManager.GetL1Files();
-
-    if (l1Files.Count == 0) {
+    if (_catalogManager == null) {
+      _logger.LogWarning("L2 compaction requires CatalogManager");
       return 0;
     }
 
-    // Group files by stream and date
-    var groups = l1Files
-        .Select(f => new { File = f, Info = ParseFileInfo(f) })
-        .Where(x => x.Info != null)
-        .GroupBy(x => new { x.Info!.Stream, x.Info.Date })
-        .ToList();
-
+    var streams = _catalogManager.GetStreams();
     var consolidatedCount = 0;
 
-    foreach (var group in groups) {
+    foreach (var stream in streams) {
       if (cancellationToken.IsCancellationRequested) {
         break;
       }
 
-      var files = group.Select(x => x.File).ToList();
+      try {
+        var count = await CompactStreamAsync(stream, cancellationToken);
+        consolidatedCount += count;
+      } catch (Exception ex) {
+        _logger.LogError(ex, "Failed to compact stream {Stream}", stream);
+      }
+    }
 
-      // Only consolidate if files are old enough
-      var age = DateTime.UtcNow - group.Key.Date;
+    return consolidatedCount;
+  }
+
+  /// <summary>
+  /// Runs L2 compaction for a specific stream.
+  /// </summary>
+  /// <param name="stream">The stream name.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  /// <returns>The number of L1 files consolidated.</returns>
+  public async Task<int> CompactStreamAsync(string stream, CancellationToken cancellationToken = default)
+  {
+    if (_catalogManager == null) {
+      return 0;
+    }
+
+    // Get L1 entries eligible for daily compaction (files with MaxTime before cutoff)
+    var cutoffDate = DateTime.UtcNow.Date;
+    var eligibleEntries = _catalogManager.GetEligibleForDailyCompaction(stream, cutoffDate);
+
+    if (eligibleEntries.Count == 0) {
+      return 0;
+    }
+
+    // Group eligible entries by date for daily consolidation
+    var groupsByDate = eligibleEntries
+        .GroupBy(e => e.MaxTime.Date)
+        .ToList();
+
+    var consolidatedCount = 0;
+
+    foreach (var group in groupsByDate) {
+      if (cancellationToken.IsCancellationRequested) {
+        break;
+      }
+
+      var entries = group.ToList();
+      var date = group.Key;
+
+      // Check if files are old enough (based on L2IntervalHours)
+      var age = DateTime.UtcNow - date;
       if (age < TimeSpan.FromHours(_settings.L2IntervalHours)) {
         continue;
       }
 
       try {
         await ConsolidateDayAsync(
-            group.Key.Stream,
-            group.Key.Date,
-            files,
+            stream,
+            date,
+            entries,
             cancellationToken);
 
-        consolidatedCount += files.Count;
+        consolidatedCount += entries.Count;
       } catch (Exception ex) {
         _logger.LogError(ex, "Failed to consolidate {Stream} for {Date}",
-            group.Key.Stream, group.Key.Date);
+            stream, date);
       }
     }
 
@@ -89,11 +127,12 @@ public sealed class L2Compactor
   private async Task ConsolidateDayAsync(
       string stream,
       DateTime date,
-      IReadOnlyList<string> l1Files,
+      IReadOnlyList<CatalogEntry> l1Entries,
       CancellationToken cancellationToken)
   {
     // Read all entries from L1 files
     var entries = new List<LogEntry>();
+    var l1Files = l1Entries.Select(e => e.FilePath).ToList();
 
     foreach (var file in l1Files) {
       await foreach (var entry in ParquetReader.ReadEntriesAsync(file, cancellationToken)) {
@@ -106,6 +145,10 @@ public sealed class L2Compactor
       return;
     }
 
+    // Calculate time bounds from actual data
+    var minTime = entries.Min(e => e.Timestamp);
+    var maxTime = entries.Max(e => e.Timestamp);
+
     // Generate L2 output path
     var outputDir = Path.Combine(_settings.L2Directory, stream);
     var outputFileName = $"{stream}_{date:yyyyMMdd}_consolidated.parquet";
@@ -114,7 +157,7 @@ public sealed class L2Compactor
 
     // Write consolidated file to a temporary location
     await ParquetWriter.WriteBatchAsync(entries, tmpOutputPath, _settings.MaxDynamicKeys, cancellationToken);
-    
+
     // Atomically move to final path
     File.Move(tmpOutputPath, outputPath, overwrite: true);
 
@@ -126,12 +169,14 @@ public sealed class L2Compactor
     if (_catalogManager != null) {
       var l2Entry = new CatalogEntry {
         StreamName = stream,
-        Date = date,
+        MinTime = minTime,
+        MaxTime = maxTime,
         FilePath = outputPath,
         Level = StorageLevel.L2,
         RowCount = entries.Count,
         FileSizeBytes = fileInfo.Length,
-        AddedAt = DateTime.UtcNow
+        AddedAt = DateTime.UtcNow,
+        CompactionTier = 2
       };
 
       await _catalogManager.ReplaceFilesAsync(l1Files, l2Entry, cancellationToken);
@@ -153,38 +198,5 @@ public sealed class L2Compactor
     _logger.LogInformation(
         "Consolidated {Count} entries from {Files} files into {Output}",
         entries.Count, l1Files.Count, outputFileName);
-  }
-
-  /// <summary>
-  /// Parses file info from a Parquet file path.
-  /// </summary>
-  private static ParsedFileInfo? ParseFileInfo(string filePath)
-  {
-    var fileName = Path.GetFileNameWithoutExtension(filePath);
-    var parts = fileName.Split('_');
-
-    if (parts.Length < 2) {
-      return null;
-    }
-
-    // Format: stream_starttime_endtime.parquet
-    var stream = parts[0];
-
-    if (!DateTime.TryParseExact(parts[1], "yyyyMMdd", null,
-        System.Globalization.DateTimeStyles.None, out var date)) {
-      // Try parsing with time component
-      if (!DateTime.TryParseExact(parts[1], "yyyyMMddHHmmss", null,
-          System.Globalization.DateTimeStyles.None, out date)) {
-        return null;
-      }
-    }
-
-    return new ParsedFileInfo { Stream = stream, Date = date.Date };
-  }
-
-  private sealed class ParsedFileInfo
-  {
-    public required string Stream { get; init; }
-    public required DateTime Date { get; init; }
   }
 }

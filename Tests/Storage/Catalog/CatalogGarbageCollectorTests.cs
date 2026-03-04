@@ -78,6 +78,7 @@ public sealed class CatalogGarbageCollectorTests : IDisposable
   [Fact]
   public async Task FindOrphanedFiles_ShouldNotIncludeCatalogedFiles()
   {
+    var now = DateTime.UtcNow;
     // Create a file on disk
     var catalogedFile = Path.Combine(_l1Directory, "cataloged.parquet");
     await File.WriteAllTextAsync(catalogedFile, "test");
@@ -85,17 +86,18 @@ public sealed class CatalogGarbageCollectorTests : IDisposable
     var catalog = new StreamCatalog {
       Entries = new List<CatalogEntry>
         {
-                new()
-                {
-                    StreamName = "test",
-                    Date = DateTime.UtcNow.Date,
-                    FilePath = Path.GetFullPath(catalogedFile),
-                    Level = StorageLevel.L1,
-                    RowCount = 100,
-                    FileSizeBytes = 4,
-                    AddedAt = DateTime.UtcNow
-                }
-            }
+          new()
+          {
+            StreamName = "test",
+            MinTime = now.AddHours(-1),
+            MaxTime = now,
+            FilePath = Path.GetFullPath(catalogedFile),
+            Level = StorageLevel.L1,
+            RowCount = 100,
+            FileSizeBytes = 4,
+            AddedAt = DateTime.UtcNow
+          }
+        }
     };
 
     var orphaned = _gc.FindOrphanedFiles(catalog, _l1Directory, _l2Directory);
@@ -126,6 +128,7 @@ public sealed class CatalogGarbageCollectorTests : IDisposable
   [Fact]
   public async Task RunGcAsync_ShouldPreserveCatalogedFiles()
   {
+    var now = DateTime.UtcNow;
     // Create cataloged file
     var catalogedFile = Path.Combine(_l1Directory, "cataloged.parquet");
     await File.WriteAllTextAsync(catalogedFile, "test");
@@ -133,17 +136,18 @@ public sealed class CatalogGarbageCollectorTests : IDisposable
     var catalog = new StreamCatalog {
       Entries = new List<CatalogEntry>
         {
-                new()
-                {
-                    StreamName = "test",
-                    Date = DateTime.UtcNow.Date,
-                    FilePath = Path.GetFullPath(catalogedFile),
-                    Level = StorageLevel.L1,
-                    RowCount = 100,
-                    FileSizeBytes = 4,
-                    AddedAt = DateTime.UtcNow
-                }
-            }
+          new()
+          {
+            StreamName = "test",
+            MinTime = now.AddHours(-1),
+            MaxTime = now,
+            FilePath = Path.GetFullPath(catalogedFile),
+            Level = StorageLevel.L1,
+            RowCount = 100,
+            FileSizeBytes = 4,
+            AddedAt = DateTime.UtcNow
+          }
+        }
     };
 
     var deletedCount = await _gc.RunGcAsync(catalog, _l1Directory, _l2Directory);

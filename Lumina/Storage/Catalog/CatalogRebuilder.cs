@@ -1,8 +1,10 @@
+using Lumina.Storage.Parquet;
+
 namespace Lumina.Storage.Catalog;
 
 /// <summary>
 /// Rebuilds the catalog from disk when the catalog is missing or corrupted.
-/// Implements L2 priority conflict resolution.
+/// Uses Parquet statistics extraction for accurate time ranges.
 /// </summary>
 public sealed class CatalogRebuilder
 {
@@ -74,7 +76,7 @@ public sealed class CatalogRebuilder
     foreach (var file in files) {
       cancellationToken.ThrowIfCancellationRequested();
 
-      var entry = await CreateEntryFromFileAsync(file, StorageLevel.L1);
+      var entry = await CreateEntryFromFileAsync(file, StorageLevel.L1, cancellationToken);
       if (entry != null) {
         entries.Add(entry);
       }
@@ -104,7 +106,7 @@ public sealed class CatalogRebuilder
     foreach (var file in files) {
       cancellationToken.ThrowIfCancellationRequested();
 
-      var entry = await CreateEntryFromFileAsync(file, StorageLevel.L2);
+      var entry = await CreateEntryFromFileAsync(file, StorageLevel.L2, cancellationToken);
       if (entry != null) {
         entries.Add(entry);
       }
@@ -114,7 +116,7 @@ public sealed class CatalogRebuilder
   }
 
   /// <summary>
-  /// Resolves conflicts where both L1 and L2 files exist for the same stream+date.
+  /// Resolves conflicts where L1 and L2 files have overlapping time ranges.
   /// L2 files take priority (they are consolidated and more efficient).
   /// </summary>
   /// <param name="entries">All entries found during scan.</param>
@@ -123,29 +125,36 @@ public sealed class CatalogRebuilder
   {
     var entryList = entries.ToList();
 
-    // Group by (StreamName, Date)
-    var groups = entryList
-        .GroupBy(e => new { e.StreamName, e.Date.Date })
+    // Group by stream name
+    var streamGroups = entryList
+        .GroupBy(e => e.StreamName)
         .ToList();
 
     var resolvedEntries = new List<CatalogEntry>();
 
-    foreach (var group in groups) {
-      var l2Entries = group.Where(e => e.Level == StorageLevel.L2).ToList();
-      var l1Entries = group.Where(e => e.Level == StorageLevel.L1).ToList();
+    foreach (var streamGroup in streamGroups) {
+      var streamEntries = streamGroup.ToList();
+      var l2Entries = streamEntries.Where(e => e.Level == StorageLevel.L2).ToList();
+      var l1Entries = streamEntries.Where(e => e.Level == StorageLevel.L1).ToList();
 
-      if (l2Entries.Count > 0) {
-        // L2 takes priority - use all L2 files
-        resolvedEntries.AddRange(l2Entries);
+      // Collect time ranges covered by L2 files
+      var l2TimeRanges = l2Entries.Select(e => (e.MinTime, e.MaxTime)).ToList();
 
-        if (l1Entries.Count > 0) {
+      // Add all L2 entries
+      resolvedEntries.AddRange(l2Entries);
+
+      // Add L1 entries that don't overlap with any L2 entry
+      foreach (var l1Entry in l1Entries) {
+        bool overlapsWithL2 = l2TimeRanges.Any(l2Range =>
+            l1Entry.MinTime <= l2Range.MaxTime && l1Entry.MaxTime >= l2Range.MinTime);
+
+        if (!overlapsWithL2) {
+          resolvedEntries.Add(l1Entry);
+        } else {
           _logger.LogDebug(
-              "Conflict resolved for {Stream}/{Date}: using {L2Count} L2 file(s), ignoring {L1Count} L1 file(s)",
-              group.Key.StreamName, group.Key.Date, l2Entries.Count, l1Entries.Count);
+              "Conflict resolved for {Path}: L1 time range [{MinTime}, {MaxTime}] overlaps with L2 file, skipping",
+              l1Entry.FilePath, l1Entry.MinTime, l1Entry.MaxTime);
         }
-      } else {
-        // No L2, use L1 files
-        resolvedEntries.AddRange(l1Entries);
       }
     }
 
@@ -157,115 +166,62 @@ public sealed class CatalogRebuilder
   }
 
   /// <summary>
-  /// Creates a catalog entry from a Parquet file.
+  /// Creates a catalog entry from a Parquet file using statistics extraction.
   /// </summary>
   /// <param name="filePath">The file path.</param>
   /// <param name="level">The storage level.</param>
-  /// <returns>The catalog entry, or null if file info couldn't be parsed.</returns>
-  private async Task<CatalogEntry?> CreateEntryFromFileAsync(string filePath, StorageLevel level)
+  /// <param name="cancellationToken">Cancellation token.</param>
+  /// <returns>The catalog entry, or null if file info couldn't be extracted.</returns>
+  private async Task<CatalogEntry?> CreateEntryFromFileAsync(string filePath, StorageLevel level, CancellationToken cancellationToken)
   {
     var fileInfo = new FileInfo(filePath);
     if (!fileInfo.Exists) {
       return null;
     }
 
-    // Parse stream name and date from file path
-    var parsedInfo = ParseFilePath(filePath, level);
-    if (parsedInfo == null) {
-      _logger.LogWarning("Could not parse file info from {Path}, skipping", filePath);
+    // Extract time bounds from Parquet file
+    var timeBounds = await ParquetStatisticsReader.ExtractTimeBoundsAsync(filePath, cancellationToken);
+    if (timeBounds == null) {
+      _logger.LogWarning("Could not extract time bounds from {Path}, skipping", filePath);
+      return null;
+    }
+
+    var (minTime, maxTime) = timeBounds.Value;
+
+    // Extract stream name from file path (directory name)
+    var streamName = ExtractStreamNameFromPath(filePath);
+    if (string.IsNullOrEmpty(streamName)) {
+      _logger.LogWarning("Could not extract stream name from {Path}, skipping", filePath);
       return null;
     }
 
     // Get row count from Parquet file
-    long rowCount = await GetRowCountAsync(filePath);
+    long rowCount = await ParquetStatisticsReader.GetRowCountAsync(filePath, cancellationToken);
 
     return new CatalogEntry {
-      StreamName = parsedInfo.StreamName,
-      Date = parsedInfo.Date,
+      StreamName = streamName,
+      MinTime = minTime,
+      MaxTime = maxTime,
       FilePath = Path.GetFullPath(filePath),
       Level = level,
       RowCount = rowCount,
       FileSizeBytes = fileInfo.Length,
-      AddedAt = DateTime.UtcNow
+      AddedAt = DateTime.UtcNow,
+      CompactionTier = (int)level
     };
   }
 
   /// <summary>
-  /// Parses stream name and date from file path.
+  /// Extracts the stream name from a file path.
+  /// The stream name is the parent directory name.
   /// </summary>
-  /// <param name="filePath">The file path.</param>
-  /// <param name="level">The storage level.</param>
-  /// <returns>Parsed info, or null if parsing failed.</returns>
-  private static ParsedFileInfo? ParseFilePath(string filePath, StorageLevel level)
+  private static string? ExtractStreamNameFromPath(string filePath)
   {
-    var fileName = Path.GetFileNameWithoutExtension(filePath);
-    var parts = fileName.Split('_');
-
-    if (parts.Length < 2) {
+    var directory = Path.GetDirectoryName(filePath);
+    if (string.IsNullOrEmpty(directory)) {
       return null;
     }
 
-    // Extract stream name - could be multiple parts if stream name contains underscores
-    // L1 format: stream_starttime_endtime.parquet
-    // L2 format: stream_yyyyMMdd_consolidated.parquet
-
-    // For L2, look for "_consolidated" suffix
-    if (level == StorageLevel.L2 && fileName.EndsWith("_consolidated")) {
-      // Format: stream_yyyyMMdd_consolidated
-      // Stream name is everything before the date
-      var consolidatedIndex = Array.FindIndex(parts, p => p == "consolidated");
-      if (consolidatedIndex >= 2) {
-        var streamName = string.Join("_", parts.Take(consolidatedIndex - 1));
-        var dateStr = parts[consolidatedIndex - 1];
-
-        if (DateTime.TryParseExact(dateStr, "yyyyMMdd", null,
-            System.Globalization.DateTimeStyles.None, out var date)) {
-          return new ParsedFileInfo { StreamName = streamName, Date = date.Date };
-        }
-      }
-    } else {
-      // L1 format: stream_starttime_endtime
-      // Try to find where stream name ends and timestamp begins
-      // Timestamps are typically yyyyMMddHHmmss format (14 digits)
-
-      for (int i = 1; i < parts.Length; i++) {
-        if (parts[i].Length >= 8 && parts[i].All(char.IsDigit)) {
-          var streamName = string.Join("_", parts.Take(i));
-          var dateStr = parts[i].Length >= 8
-              ? parts[i].Substring(0, 8)
-              : parts[i];
-
-          if (DateTime.TryParseExact(dateStr, "yyyyMMdd", null,
-              System.Globalization.DateTimeStyles.None, out var date)) {
-            return new ParsedFileInfo { StreamName = streamName, Date = date.Date };
-          }
-        }
-      }
-    }
-
-    return null;
-  }
-
-  /// <summary>
-  /// Gets the row count from a Parquet file.
-  /// </summary>
-  /// <param name="filePath">The file path.</param>
-  /// <returns>Row count, or 0 if unable to read.</returns>
-  private async Task<long> GetRowCountAsync(string filePath)
-  {
-    try {
-      await using var stream = File.OpenRead(filePath);
-      using var reader = await global::Parquet.ParquetReader.CreateAsync(stream);
-      return reader.RowGroups.Sum(rg => rg.RowCount);
-    } catch (Exception ex) {
-      _logger.LogWarning(ex, "Failed to read row count from {Path}", filePath);
-      return 0;
-    }
-  }
-
-  private sealed class ParsedFileInfo
-  {
-    public required string StreamName { get; init; }
-    public required DateTime Date { get; init; }
+    return Path.GetFileName(directory);
   }
 }

@@ -43,31 +43,35 @@ public sealed class CatalogRebuilderTests : IDisposable
   }
 
   [Fact]
-  public async Task ResolveConflicts_WhenL2Exists_ShouldPreferL2()
+  public async Task ResolveConflicts_WhenL2OverlapsL1_ShouldPreferL2()
   {
-    var entries = new List<CatalogEntry>
-    {
-            new()
-            {
-                StreamName = "test-stream",
-                Date = DateTime.UtcNow.Date,
-                FilePath = Path.Combine(_l1Directory, "test-stream_20240101_120000.parquet"),
-                Level = StorageLevel.L1,
-                RowCount = 100,
-                FileSizeBytes = 1024,
-                AddedAt = DateTime.UtcNow
-            },
-            new()
-            {
-                StreamName = "test-stream",
-                Date = DateTime.UtcNow.Date,
-                FilePath = Path.Combine(_l2Directory, "test-stream_20240101_consolidated.parquet"),
-                Level = StorageLevel.L2,
-                RowCount = 100,
-                FileSizeBytes = 768,
-                AddedAt = DateTime.UtcNow
-            }
-        };
+    var baseTime = new DateTime(2024, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    // L2 file covering 10:00 - 14:00
+    var l2Entry = new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime.AddHours(-2),
+      MaxTime = baseTime.AddHours(2),
+      FilePath = Path.Combine(_l2Directory, "test-stream_20240101_consolidated.parquet"),
+      Level = StorageLevel.L2,
+      RowCount = 100,
+      FileSizeBytes = 768,
+      AddedAt = DateTime.UtcNow
+    };
+
+    // L1 file overlapping with L2 (11:00 - 13:00)
+    var l1Entry = new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime.AddHours(-1),
+      MaxTime = baseTime.AddHours(1),
+      FilePath = Path.Combine(_l1Directory, "test-stream_20240101_120000.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 100,
+      FileSizeBytes = 1024,
+      AddedAt = DateTime.UtcNow
+    };
+
+    var entries = new List<CatalogEntry> { l1Entry, l2Entry };
 
     var resolved = _rebuilder.ResolveConflicts(entries);
 
@@ -76,31 +80,71 @@ public sealed class CatalogRebuilderTests : IDisposable
   }
 
   [Fact]
+  public async Task ResolveConflicts_WhenNoOverlap_ShouldIncludeBoth()
+  {
+    var baseTime = new DateTime(2024, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    // L2 file covering 08:00 - 10:00
+    var l2Entry = new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime.AddHours(-4),
+      MaxTime = baseTime.AddHours(-2),
+      FilePath = Path.Combine(_l2Directory, "test-stream_20240101_morning.parquet"),
+      Level = StorageLevel.L2,
+      RowCount = 100,
+      FileSizeBytes = 768,
+      AddedAt = DateTime.UtcNow
+    };
+
+    // L1 file not overlapping (14:00 - 16:00)
+    var l1Entry = new CatalogEntry {
+      StreamName = "test-stream",
+      MinTime = baseTime.AddHours(2),
+      MaxTime = baseTime.AddHours(4),
+      FilePath = Path.Combine(_l1Directory, "test-stream_20240101_afternoon.parquet"),
+      Level = StorageLevel.L1,
+      RowCount = 50,
+      FileSizeBytes = 512,
+      AddedAt = DateTime.UtcNow
+    };
+
+    var entries = new List<CatalogEntry> { l1Entry, l2Entry };
+
+    var resolved = _rebuilder.ResolveConflicts(entries);
+
+    Assert.Equal(2, resolved.Entries.Count);
+  }
+
+  [Fact]
   public async Task ResolveConflicts_WhenNoL2Exists_ShouldIncludeL1Files()
   {
+    var baseTime = new DateTime(2024, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
     var entries = new List<CatalogEntry>
     {
-            new()
-            {
-                StreamName = "test-stream",
-                Date = DateTime.UtcNow.Date,
-                FilePath = Path.Combine(_l1Directory, "test-stream_20240101_120000.parquet"),
-                Level = StorageLevel.L1,
-                RowCount = 100,
-                FileSizeBytes = 1024,
-                AddedAt = DateTime.UtcNow
-            },
-            new()
-            {
-                StreamName = "test-stream",
-                Date = DateTime.UtcNow.Date,
-                FilePath = Path.Combine(_l1Directory, "test-stream_20240101_130000.parquet"),
-                Level = StorageLevel.L1,
-                RowCount = 50,
-                FileSizeBytes = 512,
-                AddedAt = DateTime.UtcNow
-            }
-        };
+      new()
+      {
+        StreamName = "test-stream",
+        MinTime = baseTime.AddHours(-1),
+        MaxTime = baseTime,
+        FilePath = Path.Combine(_l1Directory, "test-stream_20240101_120000.parquet"),
+        Level = StorageLevel.L1,
+        RowCount = 100,
+        FileSizeBytes = 1024,
+        AddedAt = DateTime.UtcNow
+      },
+      new()
+      {
+        StreamName = "test-stream",
+        MinTime = baseTime,
+        MaxTime = baseTime.AddHours(1),
+        FilePath = Path.Combine(_l1Directory, "test-stream_20240101_130000.parquet"),
+        Level = StorageLevel.L1,
+        RowCount = 50,
+        FileSizeBytes = 512,
+        AddedAt = DateTime.UtcNow
+      }
+    };
 
     var resolved = _rebuilder.ResolveConflicts(entries);
 
@@ -109,41 +153,49 @@ public sealed class CatalogRebuilderTests : IDisposable
   }
 
   [Fact]
-  public async Task ResolveConflicts_ShouldGroupByStreamAndDate()
+  public async Task ResolveConflicts_ShouldGroupByStream()
   {
+    var baseTime = new DateTime(2024, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+    // stream-a L2 file at 08:00 - 10:00 (non-overlapping with L1)
+    // stream-a L1 file at 14:00 - 16:00 (non-overlapping with L2)
+    // stream-b L1 file at 11:00 - 12:00 (different stream)
     var entries = new List<CatalogEntry>
     {
-            new()
-            {
-                StreamName = "stream-a",
-                Date = new DateTime(2024, 1, 1),
-                FilePath = "a_20240101.parquet",
-                Level = StorageLevel.L1,
-                RowCount = 100,
-                FileSizeBytes = 1024,
-                AddedAt = DateTime.UtcNow
-            },
-            new()
-            {
-                StreamName = "stream-a",
-                Date = new DateTime(2024, 1, 2),
-                FilePath = "a_20240102.parquet",
-                Level = StorageLevel.L2,
-                RowCount = 200,
-                FileSizeBytes = 2048,
-                AddedAt = DateTime.UtcNow
-            },
-            new()
-            {
-                StreamName = "stream-b",
-                Date = new DateTime(2024, 1, 1),
-                FilePath = "b_20240101.parquet",
-                Level = StorageLevel.L1,
-                RowCount = 50,
-                FileSizeBytes = 512,
-                AddedAt = DateTime.UtcNow
-            }
-        };
+      new()
+      {
+        StreamName = "stream-a",
+        MinTime = baseTime.AddHours(-4),
+        MaxTime = baseTime.AddHours(-2),
+        FilePath = "a_20240101_l2.parquet",
+        Level = StorageLevel.L2,
+        RowCount = 200,
+        FileSizeBytes = 2048,
+        AddedAt = DateTime.UtcNow
+      },
+      new()
+      {
+        StreamName = "stream-a",
+        MinTime = baseTime.AddHours(2),
+        MaxTime = baseTime.AddHours(4),
+        FilePath = "a_20240102_l1.parquet",
+        Level = StorageLevel.L1,
+        RowCount = 100,
+        FileSizeBytes = 1024,
+        AddedAt = DateTime.UtcNow
+      },
+      new()
+      {
+        StreamName = "stream-b",
+        MinTime = baseTime.AddHours(-1),
+        MaxTime = baseTime,
+        FilePath = "b_20240101.parquet",
+        Level = StorageLevel.L1,
+        RowCount = 50,
+        FileSizeBytes = 512,
+        AddedAt = DateTime.UtcNow
+      }
+    };
 
     var resolved = _rebuilder.ResolveConflicts(entries);
 

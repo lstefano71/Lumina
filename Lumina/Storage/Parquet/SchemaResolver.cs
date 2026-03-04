@@ -55,7 +55,7 @@ public static class SchemaResolver
 
     // Fixed columns
     columns["stream"] = SchemaType.String;
-    columns["timestamp"] = SchemaType.Timestamp;
+    columns["_t"] = SchemaType.Timestamp;
     columns["level"] = SchemaType.String;
     columns["message"] = SchemaType.String;
     columns["trace_id"] = SchemaType.String;
@@ -94,7 +94,7 @@ public static class SchemaResolver
 
     // Add fixed columns
     result.Add(new ColumnSchema { Name = "stream", Type = SchemaType.String, IsNullable = false });
-    result.Add(new ColumnSchema { Name = "timestamp", Type = SchemaType.Timestamp, IsNullable = false });
+    result.Add(new ColumnSchema { Name = "_t", Type = SchemaType.Timestamp, IsNullable = false });
     result.Add(new ColumnSchema { Name = "level", Type = SchemaType.String, IsNullable = false });
     result.Add(new ColumnSchema { Name = "message", Type = SchemaType.String, IsNullable = false });
     result.Add(new ColumnSchema { Name = "trace_id", Type = SchemaType.String });
@@ -216,6 +216,6 @@ public static class SchemaResolver
 
   private static bool IsFixedColumn(string name)
   {
-    return name is "stream" or "timestamp" or "level" or "message" or "trace_id" or "span_id" or "duration_ms";
+    return name is "stream" or "_t" or "level" or "message" or "trace_id" or "span_id" or "duration_ms";
   }
 }

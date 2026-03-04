@@ -295,11 +295,11 @@ public sealed class DuckDbQueryService : IDisposable
     var conditions = new List<string>();
 
     if (start.HasValue) {
-      conditions.Add($"timestamp >= '{start.Value:yyyy-MM-dd HH:mm:ss}'");
+      conditions.Add($"_t >= '{start.Value:yyyy-MM-dd HH:mm:ss}'");
     }
 
     if (end.HasValue) {
-      conditions.Add($"timestamp <= '{end.Value:yyyy-MM-dd HH:mm:ss}'");
+      conditions.Add($"_t <= '{end.Value:yyyy-MM-dd HH:mm:ss}'");
     }
 
     if (!string.IsNullOrEmpty(level)) {
@@ -311,7 +311,7 @@ public sealed class DuckDbQueryService : IDisposable
     var sql = $@"
             SELECT * FROM read_parquet([{fileList}],union_by_name=true)
             {whereClause}
-            ORDER BY timestamp DESC
+            ORDER BY _t DESC
             LIMIT {limit}";
 
     return await ExecuteQueryAsync(sql, cancellationToken);
@@ -348,7 +348,7 @@ public sealed class DuckDbQueryService : IDisposable
             SELECT * FROM read_parquet([{fileList}],union_by_name=true)
             WHERE message ILIKE '%{searchTerm}%'
                OR stream ILIKE '%{searchTerm}%'
-            ORDER BY timestamp DESC
+            ORDER BY _t DESC
             LIMIT {limit}";
 
     return await ExecuteQueryAsync(sql, cancellationToken);
@@ -383,11 +383,11 @@ public sealed class DuckDbQueryService : IDisposable
     var conditions = new List<string>();
 
     if (start.HasValue) {
-      conditions.Add($"timestamp >= '{start.Value:yyyy-MM-dd HH:mm:ss}'");
+      conditions.Add($"_t >= '{start.Value:yyyy-MM-dd HH:mm:ss}'");
     }
 
     if (end.HasValue) {
-      conditions.Add($"timestamp <= '{end.Value:yyyy-MM-dd HH:mm:ss}'");
+      conditions.Add($"_t <= '{end.Value:yyyy-MM-dd HH:mm:ss}'");
     }
 
     var whereClause = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
@@ -396,8 +396,8 @@ public sealed class DuckDbQueryService : IDisposable
             SELECT 
                 COUNT(*) as total_count,
                 COUNT(DISTINCT level) as level_count,
-                MIN(timestamp) as earliest_timestamp,
-                MAX(timestamp) as latest_timestamp,
+                MIN(_t) as earliest_timestamp,
+                MAX(_t) as latest_timestamp,
                 level,
                 COUNT(*) as count_by_level
             FROM read_parquet([{fileList}],union_by_name=true)

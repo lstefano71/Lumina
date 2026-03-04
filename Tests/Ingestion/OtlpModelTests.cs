@@ -146,7 +146,7 @@ public class OtlpModelTests
     request.ResourceLogs.Should().HaveCount(1);
     request.ResourceLogs![0].ScopeLogs.Should().HaveCount(1);
     request.ResourceLogs[0].ScopeLogs![0].LogRecords.Should().HaveCount(1);
-    var logRecord = request.ResourceLogs[0].ScopeLogs[0].LogRecords![0];
+    var logRecord = request.ResourceLogs![0].ScopeLogs![0].LogRecords![0];
     logRecord.Body!.StringValue.Should().Be("Test log");
   }
 
