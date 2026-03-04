@@ -141,8 +141,10 @@ public class LiveQueryRefreshTests : IDisposable
   }
 
   [Fact]
-  public async Task RefreshHotBuffer_WithAttributes_ShouldStoreAsMeta()
+  public async Task RefreshHotBuffer_WithAttributes_ShouldPromoteToTopLevelColumns()
   {
+    // Attributes that appear in every entry (100%) must be promoted to top-level
+    // columns so they are directly queryable — not buried in _meta JSON.
     var entry = new LogEntry {
       Stream = "attr-test",
       Timestamp = DateTime.UtcNow,
@@ -158,14 +160,13 @@ public class LiveQueryRefreshTests : IDisposable
     var snapshot = _hotBuffer.TakeSnapshot("attr-test");
     await _queryService.RefreshHotBufferAsync("attr-test", snapshot);
 
+    // Both attributes must be queryable as first-class columns.
     var result = await _queryService.ExecuteQueryAsync(
-        "SELECT _meta FROM \"attr-test\"");
+        "SELECT env, count FROM \"attr-test\"");
 
     result.RowCount.Should().Be(1);
-    var meta = result.Rows[0]["_meta"] as string;
-    meta.Should().NotBeNull();
-    meta.Should().Contain("env");
-    meta.Should().Contain("test");
+    (result.Rows[0]["env"] as string).Should().Be("test");
+    Convert.ToInt32(result.Rows[0]["count"]).Should().Be(42);
   }
 
   [Fact]

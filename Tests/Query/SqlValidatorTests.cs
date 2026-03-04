@@ -275,4 +275,52 @@ public class SqlValidatorTests
     Assert.False(SqlValidator.IsAllowedReadFunction("write_csv"));
     Assert.False(SqlValidator.IsAllowedReadFunction("unknown_function"));
   }
+
+  // -----------------------------------------------------------------------
+  // RewriteSingleQuotedIdentifiers
+  // -----------------------------------------------------------------------
+
+  [Fact]
+  public void RewriteSingleQuotedIdentifiers_FromClause_RewritesToDoubleQuotes()
+  {
+    var sql = "SELECT * FROM 'test-stream' WHERE level = 'error'";
+    var result = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
+    Assert.Contains("FROM \"test-stream\"", result);
+    // String literal in WHERE must be left untouched
+    Assert.Contains("level = 'error'", result);
+  }
+
+  [Fact]
+  public void RewriteSingleQuotedIdentifiers_JoinClause_RewritesToDoubleQuotes()
+  {
+    var sql = "SELECT * FROM 'stream-a' JOIN 'stream-b' ON 1=1";
+    var result = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
+    Assert.Contains("FROM \"stream-a\"", result);
+    Assert.Contains("JOIN \"stream-b\"", result);
+  }
+
+  [Fact]
+  public void RewriteSingleQuotedIdentifiers_AlreadyDoubleQuoted_Unchanged()
+  {
+    var sql = "SELECT * FROM \"test-stream\" WHERE version IS NOT NULL";
+    var result = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
+    Assert.Equal(sql, result);
+  }
+
+  [Fact]
+  public void RewriteSingleQuotedIdentifiers_NoStreamReference_Unchanged()
+  {
+    var sql = "SELECT * FROM plain_table WHERE level = 'info'";
+    var result = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
+    Assert.Equal(sql, result);
+  }
+
+  [Fact]
+  public void RewriteSingleQuotedIdentifiers_CaseInsensitive_From()
+  {
+    var sql = "select * from 'my-stream'";
+    var result = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
+    Assert.Contains("\"my-stream\"", result);
+    Assert.DoesNotContain("'my-stream'", result);
+  }
 }

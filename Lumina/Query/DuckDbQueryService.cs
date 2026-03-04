@@ -1,6 +1,7 @@
 using DuckDB.NET.Data;
 
 using Lumina.Core.Configuration;
+using Lumina.Storage.Parquet;
 using Lumina.Storage.Wal;
 
 using System.Text;
@@ -32,6 +33,7 @@ public sealed class DuckDbQueryService : IDisposable
   private bool _disposed;
   private readonly HashSet<string> _registeredStreams = new(StringComparer.OrdinalIgnoreCase);
   private readonly HashSet<string> _hotTableStreams = new(StringComparer.OrdinalIgnoreCase);
+  private readonly Dictionary<string, IReadOnlyList<ColumnSchema>> _hotTableSchemas = new(StringComparer.OrdinalIgnoreCase);
   private readonly object _registrationLock = new();
   private DateTime _lastRefreshTime = DateTime.MinValue;
 
@@ -415,6 +417,9 @@ public sealed class DuckDbQueryService : IDisposable
 
   /// <summary>
   /// Materializes hot buffer entries into a DuckDB in-memory table for the given stream.
+  /// The table schema is resolved dynamically from the current entries (same logic as Parquet
+  /// writing) so that promoted attribute columns — e.g. "version" — are queryable as
+  /// top-level columns rather than being buried inside the _meta JSON blob.
   /// Called by LiveQueryRefreshService on each tick when the buffer version has changed.
   /// </summary>
   public async Task RefreshHotBufferAsync(string stream, IReadOnlyList<BufferedEntry> entries, CancellationToken cancellationToken = default)
@@ -424,11 +429,30 @@ public sealed class DuckDbQueryService : IDisposable
 
     var tableName = GetHotTableName(stream);
 
-    // Ensure the hot table exists
-    await EnsureHotTableAsync(stream, cancellationToken);
+    // Resolve schema from current entries so that attribute columns promoted to top-level
+    // in Parquet are also available in the hot table.
+    var logEntries = entries.Select(e => e.LogEntry).ToList();
+    var schema = logEntries.Count > 0
+        ? SchemaResolver.ResolveSchema(logEntries)
+        : GetFixedHotSchema();
 
-    // Clear existing data
-    await ExecuteNonQueryAsync($"DELETE FROM {tableName}", cancellationToken);
+    // Recreate the hot table when the column set has changed (or on first use).
+    bool needsRecreate;
+    lock (_registrationLock) {
+      if (_hotTableSchemas.TryGetValue(stream, out var existingSchema)) {
+        var existingCols = existingSchema.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var newCols = schema.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        needsRecreate = !existingCols.SetEquals(newCols);
+      } else {
+        needsRecreate = true;
+      }
+    }
+
+    if (needsRecreate) {
+      await RecreateHotTableAsync(stream, tableName, schema, cancellationToken);
+    } else {
+      await ExecuteNonQueryAsync($"DELETE FROM {tableName}", cancellationToken);
+    }
 
     if (entries.Count == 0) {
       // Still rebuild the view so the stream is queryable (returns 0 rows)
@@ -436,19 +460,35 @@ public sealed class DuckDbQueryService : IDisposable
       return;
     }
 
-    // Insert in batches to avoid SQL statement size limits
+    // Separate dynamic columns (promoted attributes) from the overflow _meta column.
+    var dynamicCols = schema.Where(c => !IsFixedBaseColumn(c.Name) && !c.IsOverflow).ToList();
+    var dynamicColNames = dynamicCols.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var hasOverflow = schema.Any(c => c.IsOverflow);
+
+    // Build the INSERT column list.
+    var colParts = new List<string> { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms" };
+    foreach (var dc in dynamicCols) colParts.Add($"\"{dc.Name}\"");
+    if (hasOverflow) colParts.Add("_meta");
+    var colList = string.Join(", ", colParts);
+
+    // Insert in batches to avoid SQL statement size limits.
     const int batchSize = 500;
     for (int i = 0; i < entries.Count; i += batchSize) {
       var batch = entries.Skip(i).Take(batchSize).ToList();
       var sb = new StringBuilder();
-      sb.Append($"INSERT INTO {tableName} (stream, _t, level, message, trace_id, span_id, duration_ms, _meta) VALUES ");
+      sb.Append($"INSERT INTO {tableName} ({colList}) VALUES ");
 
       for (int j = 0; j < batch.Count; j++) {
         if (j > 0) sb.Append(", ");
         var e = batch[j].LogEntry;
-        var meta = e.Attributes.Count > 0
-            ? EscapeSqlString(JsonSerializer.Serialize(e.Attributes))
-            : null;
+
+        // Attributes not promoted to a top-level column go into overflow.
+        Dictionary<string, object?>? overflowAttrs = null;
+        if (hasOverflow) {
+          overflowAttrs = e.Attributes
+              .Where(a => !dynamicColNames.Contains(a.Key))
+              .ToDictionary(a => a.Key, a => a.Value);
+        }
 
         sb.Append('(');
         sb.Append($"'{EscapeSqlString(e.Stream)}'");
@@ -464,19 +504,103 @@ public sealed class DuckDbQueryService : IDisposable
         sb.Append(e.SpanId != null ? $"'{EscapeSqlString(e.SpanId)}'" : "NULL");
         sb.Append(", ");
         sb.Append(e.DurationMs.HasValue ? e.DurationMs.Value.ToString() : "NULL");
-        sb.Append(", ");
-        sb.Append(meta != null ? $"'{meta}'" : "NULL");
+
+        // Dynamic attribute columns.
+        foreach (var dc in dynamicCols) {
+          sb.Append(", ");
+          sb.Append(e.Attributes.TryGetValue(dc.Name, out var val)
+              ? FormatSqlValue(val, dc.Type)
+              : "NULL");
+        }
+
+        // Overflow _meta.
+        if (hasOverflow) {
+          sb.Append(", ");
+          sb.Append(overflowAttrs is { Count: > 0 }
+              ? $"'{EscapeSqlString(JsonSerializer.Serialize(overflowAttrs))}'"
+              : "NULL");
+        }
+
         sb.Append(')');
       }
 
       await ExecuteNonQueryAsync(sb.ToString(), cancellationToken);
     }
 
-    // Now rebuild the view to include the hot table
+    // Rebuild the view to reflect the updated hot table.
     await RebuildStreamViewAsync(stream, cancellationToken);
 
     _logger.LogDebug("Refreshed hot buffer for stream '{Stream}' with {Count} entries", stream, entries.Count);
   }
+
+  // ---------------------------------------------------------------------------
+  // Hot-table schema helpers
+  // ---------------------------------------------------------------------------
+
+  /// <summary>
+  /// Drops and recreates the hot table with a freshly resolved schema.
+  /// Updates <see cref="_hotTableSchemas"/> and <see cref="_hotTableStreams"/>.
+  /// </summary>
+  private async Task RecreateHotTableAsync(string stream, string tableName, IReadOnlyList<ColumnSchema> schema, CancellationToken cancellationToken)
+  {
+    await ExecuteNonQueryAsync($"DROP TABLE IF EXISTS {tableName}", cancellationToken);
+
+    var colDefs = schema.Select(c => {
+      var sqlType = SchemaTypeToSql(c.Type);
+      var nullable = c.IsNullable ? "" : " NOT NULL";
+      return $"\"{c.Name}\" {sqlType}{nullable}";
+    });
+    await ExecuteNonQueryAsync($"CREATE TABLE {tableName} ({string.Join(", ", colDefs)})", cancellationToken);
+
+    lock (_registrationLock) {
+      _hotTableStreams.Add(stream);
+      _hotTableSchemas[stream] = schema;
+    }
+  }
+
+  /// <summary>
+  /// Returns the minimal fixed schema used when there are no entries to inspect.
+  /// </summary>
+  private static IReadOnlyList<ColumnSchema> GetFixedHotSchema() =>
+  [
+    new ColumnSchema { Name = "stream",      Type = SchemaType.String,    IsNullable = false },
+    new ColumnSchema { Name = "_t",          Type = SchemaType.Timestamp, IsNullable = false },
+    new ColumnSchema { Name = "level",       Type = SchemaType.String,    IsNullable = false },
+    new ColumnSchema { Name = "message",     Type = SchemaType.String,    IsNullable = false },
+    new ColumnSchema { Name = "trace_id",    Type = SchemaType.String,    IsNullable = true  },
+    new ColumnSchema { Name = "span_id",     Type = SchemaType.String,    IsNullable = true  },
+    new ColumnSchema { Name = "duration_ms", Type = SchemaType.Int32,     IsNullable = true  },
+  ];
+
+  /// <summary>Maps a <see cref="SchemaType"/> to a DuckDB SQL type name.</summary>
+  private static string SchemaTypeToSql(SchemaType type) => type switch {
+    SchemaType.Boolean => "BOOLEAN",
+    SchemaType.Int32 => "INTEGER",
+    SchemaType.Int64 => "BIGINT",
+    SchemaType.Float => "FLOAT",
+    SchemaType.Double => "DOUBLE",
+    SchemaType.Timestamp => "TIMESTAMP",
+    SchemaType.Binary => "BLOB",
+    _ => "VARCHAR"   // String, Json, Null
+  };
+
+  /// <summary>Formats a CLR value as a DuckDB SQL literal.</summary>
+  private static string FormatSqlValue(object? value, SchemaType type) => value switch {
+    null => "NULL",
+    bool b => b ? "TRUE" : "FALSE",
+    int i => i.ToString(),
+    long l => l.ToString(),
+    float f => f.ToString("G", System.Globalization.CultureInfo.InvariantCulture),
+    double d => d.ToString("G", System.Globalization.CultureInfo.InvariantCulture),
+    DateTime dt => $"'{dt.ToUniversalTime():yyyy-MM-dd HH:mm:ss.fffffff}'::TIMESTAMP",
+    DateTimeOffset dto => $"'{dto.UtcDateTime:yyyy-MM-dd HH:mm:ss.fffffff}'::TIMESTAMP",
+    string s => $"'{EscapeSqlString(s)}'",
+    _ => $"'{EscapeSqlString(value.ToString() ?? string.Empty)}'"
+  };
+
+  /// <summary>Returns true for column names that are always present in the fixed hot-table base.</summary>
+  private static bool IsFixedBaseColumn(string name) =>
+    name is "stream" or "_t" or "level" or "message" or "trace_id" or "span_id" or "duration_ms";
 
   /// <summary>
   /// Clears the hot table for a stream (called after compaction).
@@ -540,7 +664,7 @@ public sealed class DuckDbQueryService : IDisposable
     if (mapping != null && mapping.ParquetFiles.Count > 0) {
       var parquetSql = mapping.GetParquetReadSql();
       viewSql = hasHotTable
-          ? $"CREATE OR REPLACE VIEW {mapping.GetViewName()} AS SELECT * FROM ({parquetSql} UNION ALL SELECT * FROM {hotTableName})"
+          ? $"CREATE OR REPLACE VIEW {mapping.GetViewName()} AS SELECT * FROM ({parquetSql} UNION ALL BY NAME SELECT * FROM {hotTableName})"
           : mapping.GetCreateViewSql();
     } else {
       // No Parquet files yet — view reads only from the hot table

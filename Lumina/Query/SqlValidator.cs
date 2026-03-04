@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace Lumina.Query;
 
 /// <summary>
@@ -316,5 +318,26 @@ public static class SqlValidator
   public static bool IsAllowedReadFunction(string functionName)
   {
     return AllowedReadFunctions.Contains(functionName);
+  }
+
+  // Matches: FROM/JOIN 'stream-name' (single-quoted identifier in a table reference position)
+  private static readonly Regex SingleQuotedTablePattern = new(
+      @"(?<=[Ff][Rr][Oo][Mm]|[Jj][Oo][Ii][Nn])\s+'([^']+)'",
+      RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+  /// <summary>
+  /// Rewrites single-quoted stream names in FROM/JOIN clauses to double-quoted SQL identifiers.
+  /// e.g. <c>FROM 'my-stream'</c> → <c>FROM "my-stream"</c>
+  /// This allows users to write natural stream-name syntax without worrying
+  /// about DuckDB interpreting the single-quoted value as a file-path literal.
+  /// </summary>
+  public static string RewriteSingleQuotedIdentifiers(string sql)
+  {
+    return SingleQuotedTablePattern.Replace(sql, m => {
+      // Preserve the original whitespace between the keyword and the name
+      var leading = m.Value[..m.Value.IndexOf('\'')];
+      var name = m.Groups[1].Value.Replace("\"", "\"\""); // escape any embedded double-quotes
+      return $"{leading}\"{name}\"";
+    });
   }
 }

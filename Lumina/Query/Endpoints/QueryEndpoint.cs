@@ -127,6 +127,10 @@ public static class QueryEndpoint
       QuerySettings settings,
       CancellationToken cancellationToken)
   {
+    // Rewrite single-quoted stream names (e.g. FROM 'my-stream') to properly
+    // double-quoted SQL identifiers before validation and execution.
+    sql = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
+
     // Validate SQL if validation is enabled
     if (settings.EnableSqlValidation) {
       var (isValid, error) = SqlValidator.IsValidSelectQuery(sql);
