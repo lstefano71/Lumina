@@ -31,21 +31,21 @@ public sealed class CompactionSettings
 
   /// <summary>
   /// Gets the output directory for Parquet files.
-  /// Default is "data/parquet".
+  /// Default is "data/storage/parquet".
   /// </summary>
-  public string ParquetOutputDirectory { get; init; } = "data/parquet";
+  public string ParquetOutputDirectory { get; init; } = "data/storage/parquet";
 
   /// <summary>
-  /// Gets the L1 output directory for Parquet files.
-  /// Default is "data/l1".
+  /// Gets the L1 output directory for Parquet micro-batch files.
+  /// Default is "data/storage/l1".
   /// </summary>
-  public string L1Directory { get; init; } = "data/L1";
+  public string L1Directory { get; init; } = "data/storage/l1";
 
   /// <summary>
   /// Gets the L2 output directory for daily consolidated Parquet files.
-  /// Default is "data/l2".
+  /// Default is "data/storage/l2".
   /// </summary>
-  public string L2Directory { get; init; } = "data/L2";
+  public string L2Directory { get; init; } = "data/storage/l2";
 
   /// <summary>
   /// Gets the L1 window duration for time-based compaction.
@@ -61,9 +61,9 @@ public sealed class CompactionSettings
 
   /// <summary>
   /// Gets the cursor directory for storing compaction cursors.
-  /// Default is "data/cursors".
+  /// Default is "data/storage/cursors".
   /// </summary>
-  public string CursorDirectory { get; init; } = "data/cursors";
+  public string CursorDirectory { get; init; } = "data/storage/cursors";
 
   // --- Cursor resiliency settings ---
 
@@ -92,9 +92,9 @@ public sealed class CompactionSettings
 
   /// <summary>
   /// Gets the directory where the stream catalog is stored.
-  /// Default is "data/catalog".
+  /// Default is "data/storage/catalog".
   /// </summary>
-  public string CatalogDirectory { get; init; } = "data/catalog";
+  public string CatalogDirectory { get; init; } = "data/storage/catalog";
 
   /// <summary>
   /// Gets a value indicating whether to rebuild catalog on startup if corrupted.

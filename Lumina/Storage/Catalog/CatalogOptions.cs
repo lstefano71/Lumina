@@ -7,9 +7,9 @@ public sealed class CatalogOptions
 {
   /// <summary>
   /// Gets the directory where catalog.json is stored.
-  /// Default is "data/catalog".
+  /// Default is "data/storage/catalog".
   /// </summary>
-  public string CatalogDirectory { get; init; } = "data/catalog";
+  public string CatalogDirectory { get; init; } = "data/storage/catalog";
 
   /// <summary>
   /// Gets a value indicating whether to rebuild catalog on startup if corrupted.

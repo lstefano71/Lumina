@@ -6,10 +6,10 @@ namespace Lumina.Core.Configuration;
 public sealed class WalSettings
 {
   /// <summary>
-  /// Gets the directory where WAL files are stored.
-  /// Default is "data".
+  /// Gets the directory where WAL stream data is stored.
+  /// Each subdirectory represents a stream. Default is "data/streams".
   /// </summary>
-  public string DataDirectory { get; init; } = "data";
+  public string DataDirectory { get; init; } = "data/streams";
 
   /// <summary>
   /// Gets the maximum size in bytes before a WAL file is rotated.

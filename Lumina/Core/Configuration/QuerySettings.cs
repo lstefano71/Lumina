@@ -19,9 +19,9 @@ public sealed class QuerySettings
 
   /// <summary>
   /// Gets the path to the DuckDB database file.
-  /// Default is "data/lumina.duckdb".
+  /// Default is "data/storage/lumina.duckdb".
   /// </summary>
-  public string DatabasePath { get; init; } = "data/lumina.duckdb";
+  public string DatabasePath { get; init; } = "data/storage/lumina.duckdb";
 
   /// <summary>
   /// Gets the interval in seconds between stream discovery refresh operations.
