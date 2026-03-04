@@ -234,4 +234,93 @@ public class LiveQueryRefreshTests : IDisposable
     DuckDbQueryService.GetHotTableName("app.logs").Should().Be("_hot_app_logs");
     DuckDbQueryService.GetHotTableName("simple").Should().Be("_hot_simple");
   }
+
+  // ---------------------------------------------------------------------------
+  // Stream discovery — hot-only streams (no Parquet files yet)
+  // ---------------------------------------------------------------------------
+
+  [Fact]
+  public async Task HotOnlyStream_ShouldAppearInRegisteredStreams()
+  {
+    // A stream that only exists in the hot buffer (never compacted to Parquet)
+    // must be visible via GetRegisteredStreams() so that the /v1/streams endpoint
+    // can include it in its response.
+    var entry = new LogEntry {
+      Stream = "hot-only-stream",
+      Timestamp = DateTime.UtcNow,
+      Level = "info",
+      Message = "live entry"
+    };
+
+    _hotBuffer.Append("hot-only-stream", "/wal/001.wal", 100, entry);
+    var snapshot = _hotBuffer.TakeSnapshot("hot-only-stream");
+    await _queryService.RefreshHotBufferAsync("hot-only-stream", snapshot);
+
+    _queryService.GetRegisteredStreams().Should().Contain("hot-only-stream");
+  }
+
+  [Fact]
+  public async Task HotOnlyStream_ShouldAppearInHotBufferList()
+  {
+    // GetBufferedStreams() is the second source the /v1/streams endpoint uses.
+    // Confirming it returns the stream name after an Append.
+    var entry = new LogEntry {
+      Stream = "hot-buffer-stream",
+      Timestamp = DateTime.UtcNow,
+      Level = "debug",
+      Message = "buffered"
+    };
+
+    _hotBuffer.Append("hot-buffer-stream", "/wal/001.wal", 1, entry);
+
+    _hotBuffer.GetBufferedStreams().Should().Contain("hot-buffer-stream");
+  }
+
+  [Fact]
+  public async Task HotOnlyStream_ShouldBeQueryableBeforeCompaction()
+  {
+    // Regression guard: /v1/query/sql must succeed for a stream that only has
+    // hot-buffer data (i.e. the stream exists in DuckDB even before first compaction).
+    var entries = Enumerable.Range(1, 5).Select(i => new LogEntry {
+      Stream = "pre-compact-stream",
+      Timestamp = DateTime.UtcNow.AddSeconds(-i),
+      Level = "info",
+      Message = $"entry {i}",
+      Attributes = new Dictionary<string, object?> { ["version"] = i }
+    }).ToList();
+
+    foreach (var e in entries)
+      _hotBuffer.Append("pre-compact-stream", "/wal/001.wal", e.Attributes["version"] is int v ? v : 0, e);
+
+    var snapshot = _hotBuffer.TakeSnapshot("pre-compact-stream");
+    await _queryService.RefreshHotBufferAsync("pre-compact-stream", snapshot);
+
+    // The promoted attribute column "version" must be queryable directly.
+    var result = await _queryService.ExecuteQueryAsync(
+        "SELECT COUNT(*) as cnt FROM \"pre-compact-stream\" WHERE version IS NOT NULL");
+
+    result.RowCount.Should().Be(1);
+    ((long)result.Rows[0]["cnt"]).Should().Be(5);
+  }
+
+  [Fact]
+  public async Task MultipleHotOnlyStreams_AllShouldAppearInRegisteredStreams()
+  {
+    var streamNames = new[] { "stream-alpha", "stream-beta", "stream-gamma" };
+
+    foreach (var name in streamNames) {
+      var entry = new LogEntry {
+        Stream = name,
+        Timestamp = DateTime.UtcNow,
+        Level = "info",
+        Message = $"entry for {name}"
+      };
+      _hotBuffer.Append(name, "/wal/001.wal", 1, entry);
+      var snapshot = _hotBuffer.TakeSnapshot(name);
+      await _queryService.RefreshHotBufferAsync(name, snapshot);
+    }
+
+    var registered = _queryService.GetRegisteredStreams();
+    registered.Should().Contain(streamNames);
+  }
 }

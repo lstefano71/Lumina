@@ -1,4 +1,5 @@
 using Lumina.Core.Configuration;
+using Lumina.Storage.Wal;
 
 using Microsoft.AspNetCore.Mvc;
 
@@ -244,15 +245,30 @@ public static class QueryEndpoint
   private static async Task<IResult> ListStreamsAsync(
       [FromServices] DuckDbQueryService queryService,
       [FromServices] ParquetManager parquetManager,
+      [FromServices] WalHotBuffer hotBuffer,
       CancellationToken cancellationToken)
   {
-    var streams = queryService.GetRegisteredStreams();
+    var registeredStreams = queryService.GetRegisteredStreams();
     var mappings = parquetManager.GetStreamMappings();
+    var hotStreams = hotBuffer.GetBufferedStreams().ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    var streamInfos = mappings.Select(m => new StreamInfo {
-      Name = m.StreamName,
-      FileCount = m.ParquetFiles.Count,
-      TotalSizeBytes = m.ParquetFiles.Sum(f => new FileInfo(f).Length)
+    // Index Parquet mappings by stream name so we can look them up while iterating
+    // the full set of known streams (registered DuckDB views + Parquet-backed streams).
+    var mappingIndex = mappings.ToDictionary(m => m.StreamName, m => m, StringComparer.OrdinalIgnoreCase);
+
+    // Union: every stream that has a DuckDB view (hot-only or Parquet-backed).
+    var allNames = registeredStreams
+        .Union(mappingIndex.Keys, StringComparer.OrdinalIgnoreCase)
+        .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+
+    var streamInfos = allNames.Select(name => {
+      mappingIndex.TryGetValue(name, out var m);
+      return new StreamInfo {
+        Name = name,
+        FileCount = m?.ParquetFiles.Count ?? 0,
+        TotalSizeBytes = m?.ParquetFiles.Sum(f => new FileInfo(f).Length) ?? 0L,
+        HasHotData = hotStreams.Contains(name)
+      };
     }).ToList();
 
     return Results.Ok(new StreamListResponse {
@@ -395,14 +411,21 @@ public sealed class StreamInfo
   public required string Name { get; init; }
 
   /// <summary>
-  /// Gets the number of files backing this stream.
+  /// Gets the number of Parquet files backing this stream.
+  /// Zero for streams that only exist in the live hot buffer.
   /// </summary>
   public int FileCount { get; init; }
 
   /// <summary>
-  /// Gets the total size in bytes of all files.
+  /// Gets the total size in bytes of all Parquet files.
   /// </summary>
   public long TotalSizeBytes { get; init; }
+
+  /// <summary>
+  /// Gets whether this stream currently has live entries in the hot buffer
+  /// (i.e. data ingested since the last compaction cycle).
+  /// </summary>
+  public bool HasHotData { get; init; }
 }
 
 /// <summary>
