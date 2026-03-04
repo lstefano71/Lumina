@@ -7,7 +7,6 @@ using Lumina.Storage.Catalog;
 using Lumina.Storage.Compaction;
 using Lumina.Storage.Parquet;
 
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using Xunit;

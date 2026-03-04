@@ -32,6 +32,7 @@ public static class JsonIngestionEndpoint
   public static async Task<IResult> HandleSingle(
       LogIngestRequest request,
       WalManager walManager,
+      WalHotBuffer hotBuffer,
       CancellationToken cancellationToken)
   {
     try {
@@ -49,7 +50,10 @@ public static class JsonIngestionEndpoint
 
       // Get writer and write
       var writer = await walManager.GetOrCreateWriterAsync(entry.Stream, cancellationToken);
-      await writer.WriteAsync(entry, cancellationToken);
+      var offset = await writer.WriteAsync(entry, cancellationToken);
+
+      // Push to hot buffer for sub-second query visibility
+      hotBuffer.Append(entry.Stream, writer.FilePath, offset, entry);
 
       // Check for rotation
       await walManager.RotateWalIfNeededAsync(entry.Stream, cancellationToken);
@@ -71,6 +75,7 @@ public static class JsonIngestionEndpoint
   public static async Task<IResult> HandleBatch(
       BatchLogIngestRequest request,
       WalManager walManager,
+      WalHotBuffer hotBuffer,
       CancellationToken cancellationToken)
   {
     try {
@@ -96,7 +101,12 @@ public static class JsonIngestionEndpoint
 
         // Get writer and write batch
         var writer = await walManager.GetOrCreateWriterAsync(stream, cancellationToken);
-        await writer.WriteBatchAsync(streamEntries, cancellationToken);
+        var offsets = await writer.WriteBatchAsync(streamEntries, cancellationToken);
+
+        // Push to hot buffer for sub-second query visibility
+        for (int i = 0; i < streamEntries.Count; i++) {
+          hotBuffer.Append(stream, writer.FilePath, offsets[i], streamEntries[i]);
+        }
 
         // Check for rotation
         await walManager.RotateWalIfNeededAsync(stream, cancellationToken);

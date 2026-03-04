@@ -16,6 +16,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
 {
   private readonly string _tempDirectory;
   private readonly WalManager _walManager;
+  private readonly WalHotBuffer _hotBuffer;
 
   public JsonIngestionEndpointTests()
   {
@@ -29,6 +30,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       FlushIntervalMs = 100
     };
     _walManager = new WalManager(settings);
+    _hotBuffer = new WalHotBuffer();
   }
 
   public async ValueTask DisposeAsync()
@@ -51,7 +53,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       Message = "Hello"
     };
 
-    var result = await JsonIngestionEndpoint.HandleSingle(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleSingle(request, _walManager, _hotBuffer, CancellationToken.None);
 
     result.Should().BeOfType<Ok<IngestResponse>>();
     var ok = (Ok<IngestResponse>)result;
@@ -68,7 +70,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       Message = "Hello"
     };
 
-    var result = await JsonIngestionEndpoint.HandleSingle(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleSingle(request, _walManager, _hotBuffer, CancellationToken.None);
 
     result.Should().BeOfType<BadRequest<IngestResponse>>();
   }
@@ -82,7 +84,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       Message = ""
     };
 
-    var result = await JsonIngestionEndpoint.HandleSingle(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleSingle(request, _walManager, _hotBuffer, CancellationToken.None);
 
     result.Should().BeOfType<BadRequest<IngestResponse>>();
   }
@@ -96,7 +98,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       Message = "Persisted message"
     };
 
-    await JsonIngestionEndpoint.HandleSingle(request, _walManager, CancellationToken.None);
+    await JsonIngestionEndpoint.HandleSingle(request, _walManager, _hotBuffer, CancellationToken.None);
 
     // Flush writer so entries are readable
     var writer = await _walManager.GetOrCreateWriterAsync("persist-test");
@@ -127,7 +129,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
             }
     };
 
-    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, _hotBuffer, CancellationToken.None);
 
     result.Should().BeOfType<Ok<IngestResponse>>();
     var ok = (Ok<IngestResponse>)result;
@@ -146,7 +148,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
             }
     };
 
-    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, _hotBuffer, CancellationToken.None);
 
     result.Should().BeOfType<BadRequest<IngestResponse>>();
   }
@@ -159,7 +161,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       Entries = Array.Empty<LogIngestRequest>()
     };
 
-    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, _hotBuffer, CancellationToken.None);
 
     result.Should().BeOfType<BadRequest<IngestResponse>>();
   }
@@ -177,7 +179,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
             }
     };
 
-    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, CancellationToken.None);
+    var result = await JsonIngestionEndpoint.HandleBatch(request, _walManager, _hotBuffer, CancellationToken.None);
     result.Should().BeOfType<Ok<IngestResponse>>();
 
     // Flush writers so entries are readable
@@ -208,7 +210,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       }
     };
 
-    await JsonIngestionEndpoint.HandleSingle(request, _walManager, CancellationToken.None);
+    await JsonIngestionEndpoint.HandleSingle(request, _walManager, _hotBuffer, CancellationToken.None);
 
     var attrWriter = await _walManager.GetOrCreateWriterAsync("attr-test");
     await attrWriter.FlushAsync();
@@ -231,7 +233,7 @@ public class JsonIngestionEndpointTests : IAsyncDisposable
       DurationMs = 150
     };
 
-    await JsonIngestionEndpoint.HandleSingle(request, _walManager, CancellationToken.None);
+    await JsonIngestionEndpoint.HandleSingle(request, _walManager, _hotBuffer, CancellationToken.None);
 
     var traceWriter = await _walManager.GetOrCreateWriterAsync("trace-test");
     await traceWriter.FlushAsync();

@@ -11,6 +11,7 @@ using Lumina.Storage.Compaction;
 using Lumina.Storage.Wal;
 
 using OpenTelemetry.Metrics;
+
 using Serilog;
 using Serilog.Sinks.SystemConsole.Themes;
 
@@ -68,6 +69,9 @@ builder.Services.AddSingleton<WalManager>(sp => {
   return new WalManager(settings);
 });
 
+// Register WAL hot buffer for sub-second query visibility
+builder.Services.AddSingleton<WalHotBuffer>();
+
 // Register cursor validation and recovery services
 builder.Services.AddSingleton<CursorValidator>();
 builder.Services.AddSingleton<CursorRecoveryService>(sp => {
@@ -111,7 +115,8 @@ builder.Services.AddSingleton<L1Compactor>(sp => {
   var settings = sp.GetRequiredService<CompactionSettings>();
   var logger = sp.GetRequiredService<ILogger<L1Compactor>>();
   var catalogManager = sp.GetRequiredService<CatalogManager>();
-  return new L1Compactor(walManager, cursorManager, settings, logger, catalogManager);
+  var hotBuffer = sp.GetRequiredService<WalHotBuffer>();
+  return new L1Compactor(walManager, cursorManager, settings, logger, catalogManager, hotBuffer);
 });
 
 builder.Services.AddSingleton<ICompactionTier, DailyCompactionTier>();
@@ -147,8 +152,11 @@ builder.Services.AddOpenTelemetry()
     });
 
 // Register hosted services
+builder.Services.AddSingleton<WalStartupReplayService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<WalStartupReplayService>());
 builder.Services.AddHostedService<CompactorService>();
 builder.Services.AddHostedService<StreamDiscoveryService>();
+builder.Services.AddHostedService<LiveQueryRefreshService>();
 
 var app = builder.Build();
 
@@ -224,15 +232,10 @@ app.MapGet("/ready", () => Results.Ok(new {
   timestamp = DateTime.UtcNow
 }));
 
-try
-{
-    app.Run();
-}
-catch (Exception ex)
-{
-    Log.Fatal(ex, "Application terminated unexpectedly");
-}
-finally
-{
-    Log.CloseAndFlush();
+try {
+  app.Run();
+} catch (Exception ex) {
+  Log.Fatal(ex, "Application terminated unexpectedly");
+} finally {
+  Log.CloseAndFlush();
 }

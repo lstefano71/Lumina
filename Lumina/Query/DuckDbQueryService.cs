@@ -1,6 +1,10 @@
 using DuckDB.NET.Data;
 
 using Lumina.Core.Configuration;
+using Lumina.Storage.Wal;
+
+using System.Text;
+using System.Text.Json;
 
 namespace Lumina.Query;
 
@@ -27,6 +31,7 @@ public sealed class DuckDbQueryService : IDisposable
   private DuckDBConnection? _connection;
   private bool _disposed;
   private readonly HashSet<string> _registeredStreams = new(StringComparer.OrdinalIgnoreCase);
+  private readonly HashSet<string> _hotTableStreams = new(StringComparer.OrdinalIgnoreCase);
   private readonly object _registrationLock = new();
   private DateTime _lastRefreshTime = DateTime.MinValue;
 
@@ -407,6 +412,162 @@ public sealed class DuckDbQueryService : IDisposable
 
     return await ExecuteQueryAsync(sql, cancellationToken);
   }
+
+  /// <summary>
+  /// Materializes hot buffer entries into a DuckDB in-memory table for the given stream.
+  /// Called by LiveQueryRefreshService on each tick when the buffer version has changed.
+  /// </summary>
+  public async Task RefreshHotBufferAsync(string stream, IReadOnlyList<BufferedEntry> entries, CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+    if (_connection == null) return;
+
+    var tableName = GetHotTableName(stream);
+
+    // Ensure the hot table exists
+    await EnsureHotTableAsync(stream, cancellationToken);
+
+    // Clear existing data
+    await ExecuteNonQueryAsync($"DELETE FROM {tableName}", cancellationToken);
+
+    if (entries.Count == 0) {
+      // Still rebuild the view so the stream is queryable (returns 0 rows)
+      await RebuildStreamViewAsync(stream, cancellationToken);
+      return;
+    }
+
+    // Insert in batches to avoid SQL statement size limits
+    const int batchSize = 500;
+    for (int i = 0; i < entries.Count; i += batchSize) {
+      var batch = entries.Skip(i).Take(batchSize).ToList();
+      var sb = new StringBuilder();
+      sb.Append($"INSERT INTO {tableName} (stream, _t, level, message, trace_id, span_id, duration_ms, _meta) VALUES ");
+
+      for (int j = 0; j < batch.Count; j++) {
+        if (j > 0) sb.Append(", ");
+        var e = batch[j].LogEntry;
+        var meta = e.Attributes.Count > 0
+            ? EscapeSqlString(JsonSerializer.Serialize(e.Attributes))
+            : null;
+
+        sb.Append('(');
+        sb.Append($"'{EscapeSqlString(e.Stream)}'");
+        sb.Append(", ");
+        sb.Append($"'{e.Timestamp:yyyy-MM-dd HH:mm:ss.fffffff}'::TIMESTAMP");
+        sb.Append(", ");
+        sb.Append($"'{EscapeSqlString(e.Level)}'");
+        sb.Append(", ");
+        sb.Append($"'{EscapeSqlString(e.Message)}'");
+        sb.Append(", ");
+        sb.Append(e.TraceId != null ? $"'{EscapeSqlString(e.TraceId)}'" : "NULL");
+        sb.Append(", ");
+        sb.Append(e.SpanId != null ? $"'{EscapeSqlString(e.SpanId)}'" : "NULL");
+        sb.Append(", ");
+        sb.Append(e.DurationMs.HasValue ? e.DurationMs.Value.ToString() : "NULL");
+        sb.Append(", ");
+        sb.Append(meta != null ? $"'{meta}'" : "NULL");
+        sb.Append(')');
+      }
+
+      await ExecuteNonQueryAsync(sb.ToString(), cancellationToken);
+    }
+
+    // Now rebuild the view to include the hot table
+    await RebuildStreamViewAsync(stream, cancellationToken);
+
+    _logger.LogDebug("Refreshed hot buffer for stream '{Stream}' with {Count} entries", stream, entries.Count);
+  }
+
+  /// <summary>
+  /// Clears the hot table for a stream (called after compaction).
+  /// </summary>
+  public async Task ClearHotTableAsync(string stream, CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+    if (_connection == null) return;
+
+    var tableName = GetHotTableName(stream);
+    lock (_registrationLock) {
+      if (!_hotTableStreams.Contains(stream)) return;
+    }
+
+    await ExecuteNonQueryAsync($"DELETE FROM {tableName}", cancellationToken);
+    _logger.LogDebug("Cleared hot table for stream '{Stream}'", stream);
+  }
+
+  /// <summary>
+  /// Ensures the hot in-memory table exists for a stream.
+  /// </summary>
+  public async Task EnsureHotTableAsync(string stream, CancellationToken cancellationToken = default)
+  {
+    lock (_registrationLock) {
+      if (_hotTableStreams.Contains(stream)) return;
+    }
+
+    var tableName = GetHotTableName(stream);
+    var createSql = $@"CREATE TABLE IF NOT EXISTS {tableName} (
+      stream VARCHAR,
+      _t TIMESTAMP,
+      level VARCHAR,
+      message VARCHAR,
+      trace_id VARCHAR,
+      span_id VARCHAR,
+      duration_ms INTEGER,
+      _meta VARCHAR
+    )";
+
+    await ExecuteNonQueryAsync(createSql, cancellationToken);
+
+    lock (_registrationLock) {
+      _hotTableStreams.Add(stream);
+    }
+  }
+
+  /// <summary>
+  /// Rebuilds the view for a stream to include both Parquet files and the hot table.
+  /// </summary>
+  public async Task RebuildStreamViewAsync(string stream, CancellationToken cancellationToken = default)
+  {
+    var mapping = _parquetManager.GetStreamMapping(stream);
+    var hotTableName = GetHotTableName(stream);
+
+    bool hasHotTable;
+    lock (_registrationLock) {
+      hasHotTable = _hotTableStreams.Contains(stream);
+    }
+
+    string viewSql;
+    if (mapping != null && mapping.ParquetFiles.Count > 0) {
+      var parquetSql = mapping.GetParquetReadSql();
+      viewSql = hasHotTable
+          ? $"CREATE OR REPLACE VIEW {mapping.GetViewName()} AS SELECT * FROM ({parquetSql} UNION ALL SELECT * FROM {hotTableName})"
+          : mapping.GetCreateViewSql();
+    } else {
+      // No Parquet files yet — view reads only from the hot table
+      var viewName = StreamTableMapping.EscapeIdentifierPublic(stream);
+      viewSql = hasHotTable
+          ? $"CREATE OR REPLACE VIEW {viewName} AS SELECT * FROM {hotTableName}"
+          : $"CREATE OR REPLACE VIEW {viewName} AS SELECT * FROM (SELECT NULL LIMIT 0)";
+    }
+
+    await ExecuteNonQueryAsync(viewSql, cancellationToken);
+
+    lock (_registrationLock) {
+      _registeredStreams.Add(stream);
+    }
+  }
+
+  /// <summary>
+  /// Gets the DuckDB table name for the hot buffer of a stream.
+  /// </summary>
+  public static string GetHotTableName(string stream)
+  {
+    // Sanitize for SQL identifier usage
+    var sanitized = stream.Replace("-", "_").Replace(".", "_").Replace(" ", "_");
+    return $"_hot_{sanitized}";
+  }
+
+  private static string EscapeSqlString(string s) => s.Replace("'", "''");
 
   public void Dispose()
   {

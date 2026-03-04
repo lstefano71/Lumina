@@ -51,6 +51,13 @@ public sealed class QuerySettings
   public bool EnableSqlValidation { get; init; } = true;
 
   /// <summary>
+  /// Gets the interval in seconds between live WAL-to-query refresh cycles.
+  /// Controls how quickly newly-ingested entries become queryable.
+  /// Default is 1 second.
+  /// </summary>
+  public int LiveRefreshIntervalSeconds { get; init; } = 1;
+
+  /// <summary>
   /// Gets the refresh interval as a TimeSpan.
   /// </summary>
   public TimeSpan RefreshInterval => TimeSpan.FromSeconds(RefreshStreamsIntervalSeconds);

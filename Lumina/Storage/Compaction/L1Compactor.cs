@@ -16,6 +16,7 @@ public sealed class L1Compactor
   private readonly CursorManager _cursorManager;
   private readonly CompactionSettings _settings;
   private readonly CatalogManager? _catalogManager;
+  private readonly WalHotBuffer? _hotBuffer;
   private readonly ILogger<L1Compactor> _logger;
 
   public L1Compactor(
@@ -23,13 +24,15 @@ public sealed class L1Compactor
       CursorManager cursorManager,
       CompactionSettings settings,
       ILogger<L1Compactor> logger,
-      CatalogManager? catalogManager = null)
+      CatalogManager? catalogManager = null,
+      WalHotBuffer? hotBuffer = null)
   {
     _walManager = walManager;
     _cursorManager = cursorManager;
     _settings = settings;
     _logger = logger;
     _catalogManager = catalogManager;
+    _hotBuffer = hotBuffer;
   }
 
   /// <summary>
@@ -149,6 +152,9 @@ public sealed class L1Compactor
           outputPath,
           walFileSize: currentWalFileSize,
           parquetEntryCount: entries.Count);
+
+      // Evict compacted entries from the hot buffer so they are not double-counted
+      _hotBuffer?.EvictCompacted(stream, currentLastWalFile!, currentLastOffset);
 
       // If the active WAL file was included in this compaction, rotate it now so it
       // becomes a sealed file eligible for deletion. It is intentionally kept alive

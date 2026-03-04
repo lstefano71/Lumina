@@ -40,6 +40,7 @@ public static class OtlpIngestionEndpoint
   private static async Task<IResult> IngestOtlpLogsAsync(
       [FromBody] OtlpLogsRequest request,
       [FromServices] WalManager walManager,
+      [FromServices] WalHotBuffer hotBuffer,
       [FromServices] ILoggerFactory loggerFactory,
       CancellationToken cancellationToken)
   {
@@ -68,7 +69,10 @@ public static class OtlpIngestionEndpoint
             var logEntry = ConvertOtlpLogToEntry(logRecord, serviceName, scopeLog.Scope);
 
             var writer = await walManager.GetOrCreateWriterAsync(logEntry.Stream, cancellationToken);
-            await writer.WriteAsync(logEntry, cancellationToken);
+            var offset = await writer.WriteAsync(logEntry, cancellationToken);
+
+            // Push to hot buffer for sub-second query visibility
+            hotBuffer.Append(logEntry.Stream, writer.FilePath, offset, logEntry);
 
             totalIngested++;
           } catch (Exception ex) {

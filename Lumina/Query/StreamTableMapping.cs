@@ -57,6 +57,26 @@ public sealed class StreamTableMapping
   }
 
   /// <summary>
+  /// Gets the raw SELECT SQL reading from Parquet files (without CREATE VIEW wrapper).
+  /// Used by DuckDbQueryService to compose UNION ALL with the hot table.
+  /// </summary>
+  public string GetParquetReadSql()
+  {
+    var files = ParquetFiles;
+    if (files.Count == 0) {
+      return "SELECT * FROM (SELECT NULL LIMIT 0)";
+    }
+
+    var fileList = string.Join(", ", files.Select(f => $"'{EscapeSqlString(f)}'"));
+    return $"SELECT * FROM read_parquet([{fileList}], union_by_name=true)";
+  }
+
+  /// <summary>
+  /// Public accessor for EscapeIdentifier, used by DuckDbQueryService for hot-table view creation.
+  /// </summary>
+  public static string EscapeIdentifierPublic(string name) => EscapeIdentifier(name);
+
+  /// <summary>
   /// Escapes a string for use in SQL string literals.
   /// </summary>
   private static string EscapeSqlString(string s) => s.Replace("'", "''");
