@@ -134,7 +134,7 @@ public sealed class CatalogManagerTests : IDisposable
       StreamName = "test-stream",
       MinTime = now.AddHours(-2),
       MaxTime = now,
-      FilePath = Path.Combine(_testDirectory, "l2_consolidated.parquet"),
+      FilePath = Path.Combine(_testDirectory, "l2_daily.parquet"),
       Level = StorageLevel.L2,
       RowCount = 100,
       FileSizeBytes = 768,

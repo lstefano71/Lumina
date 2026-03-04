@@ -75,7 +75,8 @@ public enum StorageLevel
   L1 = 1,
 
   /// <summary>
-  /// L2: Daily consolidated Parquet files.
+  /// L2: Consolidated Parquet files (daily, monthly, or higher tiers).
+  /// Use CompactionTier to distinguish sub-tiers.
   /// </summary>
   L2 = 2
 }

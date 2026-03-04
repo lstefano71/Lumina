@@ -298,7 +298,24 @@ public sealed class CatalogManager : IDisposable
   }
 
   /// <summary>
-  /// Gets entries eligible for monthly consolidation.
+  /// Gets all daily-tier L2 entries eligible for monthly consolidation.
+  /// Returns only entries with CompactionTier == 2 (daily files, not already monthly).
+  /// </summary>
+  /// <param name="stream">The stream name.</param>
+  /// <returns>List of daily L2 catalog entries.</returns>
+  public IReadOnlyList<CatalogEntry> GetEligibleForMonthlyCompaction(string stream)
+  {
+    return _catalog.Entries
+        .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
+        .Where(e => e.Level == StorageLevel.L2)
+        .Where(e => e.CompactionTier == 2)
+        .OrderBy(e => e.MinTime)
+        .ToList();
+  }
+
+  /// <summary>
+  /// Gets entries eligible for monthly consolidation within a specific month.
+  /// Returns only daily-tier entries (CompactionTier == 2).
   /// </summary>
   /// <param name="stream">The stream name.</param>
   /// <param name="year">The year.</param>
@@ -312,6 +329,7 @@ public sealed class CatalogManager : IDisposable
     return _catalog.Entries
         .Where(e => string.Equals(e.StreamName, stream, StringComparison.OrdinalIgnoreCase))
         .Where(e => e.Level == StorageLevel.L2)
+        .Where(e => e.CompactionTier == 2)
         .Where(e => e.MinTime >= monthStart && e.MaxTime < monthEnd)
         .OrderBy(e => e.MinTime)
         .ToList();

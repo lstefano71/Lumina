@@ -52,7 +52,7 @@ public sealed class CatalogRebuilderTests : IDisposable
       StreamName = "test-stream",
       MinTime = baseTime.AddHours(-2),
       MaxTime = baseTime.AddHours(2),
-      FilePath = Path.Combine(_l2Directory, "test-stream_20240101_consolidated.parquet"),
+      FilePath = Path.Combine(_l2Directory, "test-stream_20240101.parquet"),
       Level = StorageLevel.L2,
       RowCount = 100,
       FileSizeBytes = 768,
