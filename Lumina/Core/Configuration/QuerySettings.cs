@@ -22,4 +22,36 @@ public sealed class QuerySettings
   /// Default is "data/lumina.duckdb".
   /// </summary>
   public string DatabasePath { get; init; } = "data/lumina.duckdb";
+
+  /// <summary>
+  /// Gets the interval in seconds between stream discovery refresh operations.
+  /// Default is 60 seconds.
+  /// </summary>
+  public int RefreshStreamsIntervalSeconds { get; init; } = 60;
+
+  /// <summary>
+  /// Gets a value indicating whether external file access is allowed in queries.
+  /// When enabled, users can reference external files via DuckDB's read functions.
+  /// Default is true.
+  /// </summary>
+  public bool AllowExternalFileAccess { get; init; } = true;
+
+  /// <summary>
+  /// Gets the allowed protocols for external file access.
+  /// Default is ["http", "https", "file", "s3"].
+  /// Only used when AllowExternalFileAccess is true.
+  /// </summary>
+  public IReadOnlyList<string> AllowedExternalProtocols { get; init; } = new List<string> { "http", "https", "file", "s3" }.AsReadOnly();
+
+  /// <summary>
+  /// Gets a value indicating whether SQL validation is enabled.
+  /// When enabled, queries are validated to ensure they are SELECT-only.
+  /// Default is true.
+  /// </summary>
+  public bool EnableSqlValidation { get; init; } = true;
+
+  /// <summary>
+  /// Gets the refresh interval as a TimeSpan.
+  /// </summary>
+  public TimeSpan RefreshInterval => TimeSpan.FromSeconds(RefreshStreamsIntervalSeconds);
 }

@@ -13,9 +13,24 @@ public static class QueryEndpoint
   {
     var group = app.MapGroup("/v1/query");
 
-    group.MapPost("/sql", ExecuteSqlAsync)
-        .WithName("ExecuteSQL")
-        .WithDescription("Execute a SQL query over log data")
+    // GET /v1/query/sql?q={sql} - URL-based queries
+    group.MapGet("/sql", ExecuteSqlGetAsync)
+        .WithName("ExecuteSQLGet")
+        .WithDescription("Execute a SQL query over log data (URL parameter)")
+        .Produces<QueryResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest);
+
+    // POST /v1/query/sql (text/plain) - Plain SQL body
+    group.MapPost("/sql", ExecuteSqlPostAsync)
+        .WithName("ExecuteSQLPost")
+        .WithDescription("Execute a SQL query over log data (plain text body)")
+        .Produces<QueryResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest);
+
+    // POST /v1/query/sql/parameterized (application/json) - Parameterized queries
+    group.MapPost("/sql/parameterized", ExecuteSqlParameterizedAsync)
+        .WithName("ExecuteSqlParameterized")
+        .WithDescription("Execute a parameterized SQL query over log data")
         .Produces<QueryResponse>(StatusCodes.Status200OK)
         .Produces(StatusCodes.Status400BadRequest);
 
@@ -33,10 +48,64 @@ public static class QueryEndpoint
         .WithName("GetStats")
         .WithDescription("Get statistics for a stream")
         .Produces<QueryResponse>(StatusCodes.Status200OK);
+
+    // Stream management endpoints
+    var streamsGroup = app.MapGroup("/v1/streams");
+
+    // GET /v1/streams - List all available streams
+    streamsGroup.MapGet("/", ListStreamsAsync)
+        .WithName("ListStreams")
+        .WithDescription("List all available streams")
+        .Produces<StreamListResponse>(StatusCodes.Status200OK);
+
+    // GET /v1/streams/{stream}/schema - Get stream schema
+    streamsGroup.MapGet("/{stream}/schema", GetStreamSchemaAsync)
+        .WithName("GetStreamSchema")
+        .WithDescription("Get schema information for a stream")
+        .Produces<StreamSchemaResponse>(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status404NotFound);
   }
 
-  private static async Task<IResult> ExecuteSqlAsync(
-      [FromBody] SqlQueryRequest request,
+  /// <summary>
+  /// GET /v1/query/sql?q={sql} - Execute SQL query from URL parameter.
+  /// </summary>
+  private static async Task<IResult> ExecuteSqlGetAsync(
+      [FromQuery(Name = "q")] string q,
+      [FromServices] DuckDbQueryService queryService,
+      [FromServices] QuerySettings settings,
+      CancellationToken cancellationToken)
+  {
+    if (string.IsNullOrWhiteSpace(q)) {
+      return Results.BadRequest("SQL query (q) is required");
+    }
+
+    return await ExecuteQueryInternalAsync(q, null, queryService, settings, cancellationToken);
+  }
+
+  /// <summary>
+  /// POST /v1/query/sql - Execute SQL query from plain text body.
+  /// </summary>
+  private static async Task<IResult> ExecuteSqlPostAsync(
+      HttpContext context,
+      [FromServices] DuckDbQueryService queryService,
+      [FromServices] QuerySettings settings,
+      CancellationToken cancellationToken)
+  {
+    using var reader = new StreamReader(context.Request.Body);
+    var sql = await reader.ReadToEndAsync(cancellationToken);
+
+    if (string.IsNullOrWhiteSpace(sql)) {
+      return Results.BadRequest("SQL query body is required");
+    }
+
+    return await ExecuteQueryInternalAsync(sql, null, queryService, settings, cancellationToken);
+  }
+
+  /// <summary>
+  /// POST /v1/query/sql/parameterized - Execute parameterized SQL query.
+  /// </summary>
+  private static async Task<IResult> ExecuteSqlParameterizedAsync(
+      [FromBody] SqlParameterizedRequest request,
       [FromServices] DuckDbQueryService queryService,
       [FromServices] QuerySettings settings,
       CancellationToken cancellationToken)
@@ -45,20 +114,42 @@ public static class QueryEndpoint
       return Results.BadRequest("SQL query is required");
     }
 
-    // Basic validation
-    var sql = request.Sql.Trim();
-    if (!sql.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase)) {
-      return Results.BadRequest("Only SELECT queries are allowed");
+    return await ExecuteQueryInternalAsync(request.Sql, request.Parameters, queryService, settings, cancellationToken);
+  }
+
+  /// <summary>
+  /// Internal method to execute queries with validation.
+  /// </summary>
+  private static async Task<IResult> ExecuteQueryInternalAsync(
+      string sql,
+      Dictionary<string, object?>? parameters,
+      DuckDbQueryService queryService,
+      QuerySettings settings,
+      CancellationToken cancellationToken)
+  {
+    // Validate SQL if validation is enabled
+    if (settings.EnableSqlValidation) {
+      var (isValid, error) = SqlValidator.IsValidSelectQuery(sql);
+      if (!isValid) {
+        return Results.BadRequest(error);
+      }
     }
 
     try {
-      var result = await queryService.ExecuteQueryAsync(sql, cancellationToken);
+      var result = await queryService.ExecuteQueryAsync(sql, parameters, cancellationToken);
+
+      var columns = result.Columns.Select(c => new EndpointColumnInfo {
+        Name = c,
+        Type = "UNKNOWN",
+        IsNullable = true
+      }).ToList();
 
       return Results.Ok(new QueryResponse {
         Rows = result.Rows,
         RowCount = result.RowCount,
-        Columns = result.Columns,
-        ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds
+        Columns = columns,
+        ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds,
+        RegisteredStreams = result.RegisteredStreams
       });
     } catch (Exception ex) {
       return Results.BadRequest($"Query execution failed: {ex.Message}");
@@ -76,11 +167,18 @@ public static class QueryEndpoint
   {
     var result = await queryService.QueryLogsAsync(stream, start, end, level, limit, cancellationToken);
 
+    var columns = result.Columns.Select(c => new EndpointColumnInfo {
+      Name = c,
+      Type = "UNKNOWN",
+      IsNullable = true
+    }).ToList();
+
     return Results.Ok(new QueryResponse {
       Rows = result.Rows,
       RowCount = result.RowCount,
-      Columns = result.Columns,
-      ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds
+      Columns = columns,
+      ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds,
+      RegisteredStreams = result.RegisteredStreams
     });
   }
 
@@ -97,11 +195,18 @@ public static class QueryEndpoint
 
     var result = await queryService.SearchLogsAsync(stream, q, limit, cancellationToken);
 
+    var columns = result.Columns.Select(c => new EndpointColumnInfo {
+      Name = c,
+      Type = "UNKNOWN",
+      IsNullable = true
+    }).ToList();
+
     return Results.Ok(new QueryResponse {
       Rows = result.Rows,
       RowCount = result.RowCount,
-      Columns = result.Columns,
-      ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds
+      Columns = columns,
+      ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds,
+      RegisteredStreams = result.RegisteredStreams
     });
   }
 
@@ -114,28 +219,96 @@ public static class QueryEndpoint
   {
     var result = await queryService.GetStatsAsync(stream, start, end, cancellationToken);
 
+    var columns = result.Columns.Select(c => new EndpointColumnInfo {
+      Name = c,
+      Type = "UNKNOWN",
+      IsNullable = true
+    }).ToList();
+
     return Results.Ok(new QueryResponse {
       Rows = result.Rows,
       RowCount = result.RowCount,
-      Columns = result.Columns,
-      ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds
+      Columns = columns,
+      ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds,
+      RegisteredStreams = result.RegisteredStreams
+    });
+  }
+
+  /// <summary>
+  /// GET /v1/streams - List all available streams.
+  /// </summary>
+  private static async Task<IResult> ListStreamsAsync(
+      [FromServices] DuckDbQueryService queryService,
+      [FromServices] ParquetManager parquetManager,
+      CancellationToken cancellationToken)
+  {
+    var streams = queryService.GetRegisteredStreams();
+    var mappings = parquetManager.GetStreamMappings();
+
+    var streamInfos = mappings.Select(m => new StreamInfo {
+      Name = m.StreamName,
+      FileCount = m.ParquetFiles.Count,
+      TotalSizeBytes = m.ParquetFiles.Sum(f => new FileInfo(f).Length)
+    }).ToList();
+
+    return Results.Ok(new StreamListResponse {
+      Streams = streamInfos,
+      TotalCount = streamInfos.Count,
+      LastRefreshTime = queryService.LastRefreshTime
+    });
+  }
+
+  /// <summary>
+  /// GET /v1/streams/{stream}/schema - Get stream schema.
+  /// </summary>
+  private static async Task<IResult> GetStreamSchemaAsync(
+      string stream,
+      [FromServices] ParquetManager parquetManager,
+      CancellationToken cancellationToken)
+  {
+    var schema = await parquetManager.GetStreamSchemaAsync(stream, cancellationToken);
+
+    if (schema == null) {
+      return Results.NotFound($"Stream '{stream}' not found");
+    }
+
+    // Convert ColumnInfo from Query namespace to EndpointColumnInfo
+    var columns = schema.Columns.Select(c => new EndpointColumnInfo {
+      Name = c.Name,
+      Type = c.Type,
+      IsNullable = c.IsNullable
+    }).ToList();
+
+    return Results.Ok(new StreamSchemaResponse {
+      StreamName = schema.StreamName,
+      Columns = columns,
+      FileCount = schema.FileCount,
+      TotalSizeBytes = schema.TotalSizeBytes,
+      MinTimestamp = schema.MinTimestamp,
+      MaxTimestamp = schema.MaxTimestamp
     });
   }
 }
 
 /// <summary>
-/// SQL query request.
+/// SQL query request for parameterized queries.
 /// </summary>
-public sealed class SqlQueryRequest
+public sealed class SqlParameterizedRequest
 {
   /// <summary>
-  /// Gets or sets the SQL query.
+  /// Gets or sets the SQL query with parameter placeholders ($name or $1, $2, etc.).
   /// </summary>
   public required string Sql { get; init; }
+
+  /// <summary>
+  /// Gets or sets the parameters for the query.
+  /// Keys are parameter names (without $ prefix), values are parameter values.
+  /// </summary>
+  public Dictionary<string, object?>? Parameters { get; init; }
 }
 
 /// <summary>
-/// Query response.
+/// Query response with result data and execution metadata.
 /// </summary>
 public sealed class QueryResponse
 {
@@ -150,12 +323,116 @@ public sealed class QueryResponse
   public int RowCount { get; init; }
 
   /// <summary>
-  /// Gets the column names.
+  /// Gets the column names and their types.
   /// </summary>
-  public IReadOnlyList<string> Columns { get; init; } = Array.Empty<string>();
+  public IReadOnlyList<EndpointColumnInfo> Columns { get; init; } = Array.Empty<EndpointColumnInfo>();
 
   /// <summary>
   /// Gets the execution time in milliseconds.
   /// </summary>
   public double ExecutionTimeMs { get; init; }
+
+  /// <summary>
+  /// Gets the available streams that were registered as tables for this query.
+  /// </summary>
+  public IReadOnlyList<string> RegisteredStreams { get; init; } = Array.Empty<string>();
+}
+
+/// <summary>
+/// Information about a result column for API responses.
+/// </summary>
+public sealed class EndpointColumnInfo
+{
+  /// <summary>
+  /// Gets the column name.
+  /// </summary>
+  public required string Name { get; init; }
+
+  /// <summary>
+  /// Gets the column data type.
+  /// </summary>
+  public required string Type { get; init; }
+
+  /// <summary>
+  /// Gets a value indicating whether the column can contain null values.
+  /// </summary>
+  public bool IsNullable { get; init; } = true;
+}
+
+/// <summary>
+/// Response for listing streams.
+/// </summary>
+public sealed class StreamListResponse
+{
+  /// <summary>
+  /// Gets the list of available streams.
+  /// </summary>
+  public IReadOnlyList<StreamInfo> Streams { get; init; } = Array.Empty<StreamInfo>();
+
+  /// <summary>
+  /// Gets the total number of streams.
+  /// </summary>
+  public int TotalCount { get; init; }
+
+  /// <summary>
+  /// Gets the last time streams were refreshed.
+  /// </summary>
+  public DateTime LastRefreshTime { get; init; }
+}
+
+/// <summary>
+/// Information about a stream.
+/// </summary>
+public sealed class StreamInfo
+{
+  /// <summary>
+  /// Gets the stream name.
+  /// </summary>
+  public required string Name { get; init; }
+
+  /// <summary>
+  /// Gets the number of files backing this stream.
+  /// </summary>
+  public int FileCount { get; init; }
+
+  /// <summary>
+  /// Gets the total size in bytes of all files.
+  /// </summary>
+  public long TotalSizeBytes { get; init; }
+}
+
+/// <summary>
+/// Response for stream schema.
+/// </summary>
+public sealed class StreamSchemaResponse
+{
+  /// <summary>
+  /// Gets the stream name.
+  /// </summary>
+  public required string StreamName { get; init; }
+
+  /// <summary>
+  /// Gets the columns in the stream schema.
+  /// </summary>
+  public required IReadOnlyList<EndpointColumnInfo> Columns { get; init; }
+
+  /// <summary>
+  /// Gets the number of Parquet files backing this stream.
+  /// </summary>
+  public int FileCount { get; init; }
+
+  /// <summary>
+  /// Gets the total size in bytes of all Parquet files.
+  /// </summary>
+  public long TotalSizeBytes { get; init; }
+
+  /// <summary>
+  /// Gets the earliest timestamp in the stream.
+  /// </summary>
+  public DateTime? MinTimestamp { get; init; }
+
+  /// <summary>
+  /// Gets the latest timestamp in the stream.
+  /// </summary>
+  public DateTime? MaxTimestamp { get; init; }
 }

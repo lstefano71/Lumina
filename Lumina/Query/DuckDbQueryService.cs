@@ -13,6 +13,7 @@ public sealed class QueryResult
   public int RowCount { get; init; }
   public IReadOnlyList<string> Columns { get; init; } = Array.Empty<string>();
   public TimeSpan ExecutionTime { get; init; }
+  public IReadOnlyList<string> RegisteredStreams { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>
@@ -25,6 +26,9 @@ public sealed class DuckDbQueryService : IDisposable
   private readonly ILogger<DuckDbQueryService> _logger;
   private DuckDBConnection? _connection;
   private bool _disposed;
+  private readonly HashSet<string> _registeredStreams = new(StringComparer.OrdinalIgnoreCase);
+  private readonly object _registrationLock = new();
+  private DateTime _lastRefreshTime = DateTime.MinValue;
 
   public DuckDbQueryService(
       QuerySettings settings,
@@ -37,7 +41,22 @@ public sealed class DuckDbQueryService : IDisposable
   }
 
   /// <summary>
-  /// Initializes the DuckDB connection.
+  /// Gets the list of currently registered stream names.
+  /// </summary>
+  public IReadOnlyList<string> GetRegisteredStreams()
+  {
+    lock (_registrationLock) {
+      return _registeredStreams.OrderBy(s => s).ToList();
+    }
+  }
+
+  /// <summary>
+  /// Gets the last refresh time for stream registrations.
+  /// </summary>
+  public DateTime LastRefreshTime => _lastRefreshTime;
+
+  /// <summary>
+  /// Initializes the DuckDB connection and registers all streams.
   /// </summary>
   public async Task InitializeAsync(CancellationToken cancellationToken = default)
   {
@@ -45,6 +64,93 @@ public sealed class DuckDbQueryService : IDisposable
     await _connection.OpenAsync(cancellationToken);
 
     _logger.LogInformation("DuckDB in-memory connection opened");
+
+    // Register all discovered streams as views
+    await RegisterStreamTablesAsync(cancellationToken);
+  }
+
+  /// <summary>
+  /// Discovers and registers all streams as DuckDB views.
+  /// </summary>
+  public async Task RegisterStreamTablesAsync(CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+
+    if (_connection == null) {
+      await InitializeAsync(cancellationToken);
+      return;
+    }
+
+    var mappings = _parquetManager.GetStreamMappings();
+    var registered = new List<string>();
+
+    foreach (var mapping in mappings) {
+      cancellationToken.ThrowIfCancellationRequested();
+
+      try {
+        var createViewSql = mapping.GetCreateViewSql();
+        await ExecuteNonQueryAsync(createViewSql, cancellationToken);
+
+        lock (_registrationLock) {
+          _registeredStreams.Add(mapping.StreamName);
+        }
+
+        registered.Add(mapping.StreamName);
+        _logger.LogDebug("Registered stream '{Stream}' as view with {FileCount} files",
+            mapping.StreamName, mapping.ParquetFiles.Count);
+      } catch (Exception ex) {
+        _logger.LogWarning(ex, "Failed to register stream '{Stream}' as view", mapping.StreamName);
+      }
+    }
+
+    _lastRefreshTime = DateTime.UtcNow;
+    _logger.LogInformation("Registered {Count} streams as DuckDB views", registered.Count);
+  }
+
+  /// <summary>
+  /// Refreshes stream registrations (adds new streams, updates existing).
+  /// </summary>
+  public async Task RefreshStreamsAsync(CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+    _logger.LogDebug("Refreshing stream registrations...");
+
+    await RegisterStreamTablesAsync(cancellationToken);
+  }
+
+  /// <summary>
+  /// Registers a single stream as a DuckDB view.
+  /// </summary>
+  /// <param name="streamName">The stream name to register.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  public async Task<bool> RegisterStreamAsync(string streamName, CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+
+    var mapping = _parquetManager.GetStreamMapping(streamName);
+    if (mapping == null) {
+      return false;
+    }
+
+    try {
+      // Drop existing view if any
+      var dropViewSql = mapping.GetDropViewSql();
+      await ExecuteNonQueryAsync(dropViewSql, cancellationToken);
+
+      // Create new view
+      var createViewSql = mapping.GetCreateViewSql();
+      await ExecuteNonQueryAsync(createViewSql, cancellationToken);
+
+      lock (_registrationLock) {
+        _registeredStreams.Add(streamName);
+      }
+
+      _logger.LogDebug("Registered stream '{Stream}' as view", streamName);
+      return true;
+    } catch (Exception ex) {
+      _logger.LogWarning(ex, "Failed to register stream '{Stream}' as view", streamName);
+      return false;
+    }
   }
 
   /// <summary>
@@ -54,6 +160,21 @@ public sealed class DuckDbQueryService : IDisposable
   /// <param name="cancellationToken">Cancellation token.</param>
   /// <returns>The query result.</returns>
   public async Task<QueryResult> ExecuteQueryAsync(string sql, CancellationToken cancellationToken = default)
+  {
+    return await ExecuteQueryAsync(sql, null, cancellationToken);
+  }
+
+  /// <summary>
+  /// Executes a SQL query with optional parameters.
+  /// </summary>
+  /// <param name="sql">The SQL query.</param>
+  /// <param name="parameters">Optional query parameters.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  /// <returns>The query result.</returns>
+  public async Task<QueryResult> ExecuteQueryAsync(
+      string sql,
+      Dictionary<string, object?>? parameters,
+      CancellationToken cancellationToken = default)
   {
     ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -68,6 +189,15 @@ public sealed class DuckDbQueryService : IDisposable
     try {
       using var command = _connection!.CreateCommand();
       command.CommandText = sql;
+
+      // Add parameters if provided
+      if (parameters != null) {
+        foreach (var (name, value) in parameters) {
+          var paramName = name.StartsWith("$") ? name : $"${name}";
+          var duckDbParam = new DuckDBParameter(paramName, value ?? DBNull.Value);
+          command.Parameters.Add(duckDbParam);
+        }
+      }
 
       using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -94,12 +224,41 @@ public sealed class DuckDbQueryService : IDisposable
 
     stopwatch.Stop();
 
+    IReadOnlyList<string> registeredStreams;
+    lock (_registrationLock) {
+      registeredStreams = _registeredStreams.OrderBy(s => s).ToList();
+    }
+
     return new QueryResult {
       Rows = rows,
       RowCount = rows.Count,
       Columns = columns,
-      ExecutionTime = stopwatch.Elapsed
+      ExecutionTime = stopwatch.Elapsed,
+      RegisteredStreams = registeredStreams
     };
+  }
+
+  /// <summary>
+  /// Executes a non-query SQL statement (e.g., CREATE VIEW).
+  /// </summary>
+  /// <param name="sql">The SQL statement.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  private async Task ExecuteNonQueryAsync(string sql, CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+
+    if (_connection == null) {
+      await InitializeAsync(cancellationToken);
+    }
+
+    try {
+      using var command = _connection!.CreateCommand();
+      command.CommandText = sql;
+      await command.ExecuteNonQueryAsync(cancellationToken);
+    } catch (Exception ex) {
+      _logger.LogError(ex, "Non-query execution failed: {SQL}", sql);
+      throw;
+    }
   }
 
   /// <summary>

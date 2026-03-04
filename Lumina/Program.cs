@@ -103,6 +103,7 @@ builder.Services.AddOpenTelemetry()
 
 // Register hosted services
 builder.Services.AddHostedService<CompactorService>();
+builder.Services.AddHostedService<StreamDiscoveryService>();
 
 var app = builder.Build();
 
