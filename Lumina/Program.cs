@@ -96,6 +96,14 @@ builder.Services.AddSingleton<L1Compactor>(sp => {
   return new L1Compactor(walManager, cursorManager, settings, logger, catalogManager);
 });
 
+builder.Services.AddSingleton<L2Compactor>(sp => {
+  var settings = sp.GetRequiredService<CompactionSettings>();
+  var parquetManager = sp.GetRequiredService<ParquetManager>();
+  var logger = sp.GetRequiredService<ILogger<L2Compactor>>();
+  var catalogManager = sp.GetRequiredService<CatalogManager>();
+  return new L2Compactor(settings, parquetManager, logger, catalogManager);
+});
+
 builder.Services.AddSingleton<ParquetManager>(sp => {
   var settings = sp.GetRequiredService<CompactionSettings>();
   var logger = sp.GetRequiredService<ILogger<ParquetManager>>();
