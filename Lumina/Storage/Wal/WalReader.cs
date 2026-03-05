@@ -156,6 +156,12 @@ public sealed class WalReader : IDisposable
           break;
         }
 
+        // Skip padding frames — they occupy space left by failed writes
+        if (frameHeader.Type == WalEntryType.Padding) {
+          _fileStream.Position += frameHeader.Length;
+          continue;
+        }
+
         // Ensure buffer is large enough
         var payloadSize = (int)frameHeader.Length;
         if (buffer.Length < payloadSize) {

@@ -72,12 +72,12 @@ public sealed class LiveQueryRefreshService : BackgroundService
     var streams = _hotBuffer.GetBufferedStreams();
 
     foreach (var stream in streams) {
-      var currentVersion = _hotBuffer.GetStreamVersion(stream);
+      // Atomically capture both version and snapshot to eliminate the TOCTOU gap
+      // where entries could be appended between GetStreamVersion and TakeSnapshot.
+      var (currentVersion, snapshot) = _hotBuffer.TakeSnapshotWithVersion(stream);
 
       _lastSeenVersions.TryGetValue(stream, out var lastVersion);
       if (currentVersion == lastVersion) continue;
-
-      var snapshot = _hotBuffer.TakeSnapshot(stream);
 
       try {
         await _queryService.RefreshHotBufferAsync(stream, snapshot, cancellationToken);

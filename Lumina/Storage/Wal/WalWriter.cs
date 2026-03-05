@@ -122,9 +122,16 @@ public sealed class WalWriter : IAsyncDisposable
       // each get their own non-overlapping region.
       var offset = Interlocked.Add(ref _currentOffset, totalSize) - totalSize;
 
-      // Write at the reserved offset (safe for concurrent callers).
-      await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), offset, cancellationToken);
-      await _fileStream.FlushAsync(cancellationToken);
+      try {
+        // Write at the reserved offset (safe for concurrent callers).
+        await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), offset, cancellationToken);
+        await _fileStream.FlushAsync(cancellationToken);
+      } catch {
+        // The offset space has already been reserved. Write a padding frame so
+        // readers can cleanly skip this region instead of hitting garbage bytes.
+        WritePaddingFrame(buffer, totalSize, offset);
+        throw;
+      }
 
       return offset;
     } finally {
@@ -177,9 +184,16 @@ public sealed class WalWriter : IAsyncDisposable
         bufferOffset += payloads[i].Length;
       }
 
-      // Write at the reserved offset (safe for concurrent callers).
-      await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), baseOffset, cancellationToken);
-      await _fileStream.FlushAsync(cancellationToken);
+      try {
+        // Write at the reserved offset (safe for concurrent callers).
+        await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), baseOffset, cancellationToken);
+        await _fileStream.FlushAsync(cancellationToken);
+      } catch {
+        // The offset space has already been reserved. Write a padding frame so
+        // readers can cleanly skip this region instead of hitting garbage bytes.
+        WritePaddingFrame(buffer, totalSize, baseOffset);
+        throw;
+      }
 
       return offsets;
     } finally {
@@ -224,6 +238,30 @@ public sealed class WalWriter : IAsyncDisposable
   {
     if (!_headerWritten) {
       throw new InvalidOperationException("WAL file header has not been written.");
+    }
+  }
+
+  /// <summary>
+  /// Writes a padding frame at the given offset so that readers can cleanly skip
+  /// a region whose original write failed after offset space was reserved.
+  /// This is best-effort; if it also fails the region remains as garbage bytes
+  /// which the reader's ScanToNextValidFrame logic will skip.
+  /// </summary>
+  private void WritePaddingFrame(byte[] buffer, int totalSize, long offset)
+  {
+    try {
+      var paddingPayloadSize = totalSize - WalFrameHeader.Size;
+      if (paddingPayloadSize < 0) return;
+
+      var padHeader = new WalFrameHeader((uint)paddingPayloadSize, WalEntryType.Padding);
+      padHeader.WriteTo(buffer.AsSpan(0, WalFrameHeader.Size));
+
+      // Zero out the payload region so the file doesn't contain leftover data
+      buffer.AsSpan(WalFrameHeader.Size, paddingPayloadSize).Clear();
+
+      RandomAccess.Write(_handle, buffer.AsSpan(0, totalSize), offset);
+    } catch {
+      // Best effort — the reader's scan logic will handle remaining garbage.
     }
   }
 

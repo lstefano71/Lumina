@@ -68,6 +68,12 @@ public sealed class L1Compactor
     var currentLastOffset = lastOffset;
     long? currentWalFileSize = null;
 
+    // Snapshot the active writer path BEFORE reading. If a natural rotation
+    // occurs between the read phase and the rotation/deletion phase, we still
+    // know which file was active and can defer its deletion to avoid losing
+    // entries that were appended after our read cursor.
+    var activeFileAtReadTime = _walManager.GetActiveWriterFilePath(stream);
+
     // Read entries from WAL since last compaction
     var walFiles = _walManager.GetWalFiles(stream);
     foreach (var walFile in walFiles) {
@@ -156,21 +162,35 @@ public sealed class L1Compactor
       // Evict compacted entries from the hot buffer so they are not double-counted
       _hotBuffer?.EvictCompacted(stream, currentLastWalFile!, currentLastOffset);
 
-      // If the active WAL file was included in this compaction, rotate it now so it
-      // becomes a sealed file eligible for deletion. It is intentionally kept alive
-      // for one more cycle because entries may have been appended to it after the
-      // compaction read (between currentLastOffset and the rotation point). Those
-      // entries will be picked up and the file deleted on the next compaction run.
+      // If the active WAL file (as seen at read time) was included in this
+      // compaction, rotate it and defer its deletion. Entries may have been
+      // appended to it after our read cursor (between currentLastOffset and
+      // the rotation point). Those entries will be picked up on the next run.
+      //
+      // We compare against activeFileAtReadTime (captured before the read loop)
+      // rather than re-querying GetActiveWriterFilePath, because a natural
+      // rotation could have already swapped the active writer, turning the
+      // file we read into a sealed file that the original code would happily
+      // delete — losing any trailing entries.
       var activeFilePath = _walManager.GetActiveWriterFilePath(stream);
       string? deferredDeletePath = null;
-      if (string.Equals(currentLastWalFile, activeFilePath, StringComparison.OrdinalIgnoreCase)) {
-        deferredDeletePath = activeFilePath;
-        await _walManager.ForceRotateAsync(stream, cancellationToken);
-        activeFilePath = _walManager.GetActiveWriterFilePath(stream);
-        _logger.LogDebug("Rotated active WAL file {File} after compaction", Path.GetFileName(deferredDeletePath));
+      if (string.Equals(currentLastWalFile, activeFileAtReadTime, StringComparison.OrdinalIgnoreCase)) {
+        deferredDeletePath = activeFileAtReadTime;
+        if (string.Equals(activeFileAtReadTime, activeFilePath, StringComparison.OrdinalIgnoreCase)) {
+          // Still the active file — rotate it explicitly
+          await _walManager.ForceRotateAsync(stream, cancellationToken);
+          activeFilePath = _walManager.GetActiveWriterFilePath(stream);
+          _logger.LogDebug("Rotated active WAL file {File} after compaction", Path.GetFileName(deferredDeletePath));
+        } else {
+          // Natural rotation already happened; the old active is now sealed
+          // but may have trailing entries — defer its deletion
+          _logger.LogDebug("Deferring deletion of naturally-rotated WAL file {File}", Path.GetFileName(deferredDeletePath));
+        }
       }
 
-      // Delete all sealed WAL files (non-active, non-deferred) — they are fully represented in Parquet
+      // Delete sealed WAL files that are fully represented in Parquet.
+      // Protect: (a) the current active writer, and (b) the deferred-delete file
+      // (just rotated or naturally rotated, may have trailing entries).
       foreach (var walFile in _walManager.GetWalFiles(stream)) {
         if (string.Equals(walFile, activeFilePath, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(walFile, deferredDeletePath, StringComparison.OrdinalIgnoreCase)) {

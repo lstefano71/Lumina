@@ -96,6 +96,19 @@ public sealed class WalHotBuffer
   }
 
   /// <summary>
+  /// Atomically captures both the stream version and a snapshot of buffered entries.
+  /// This eliminates the TOCTOU gap between reading the version and taking the snapshot.
+  /// </summary>
+  public (long Version, IReadOnlyList<BufferedEntry> Snapshot) TakeSnapshotWithVersion(string stream)
+  {
+    if (!_buffers.TryGetValue(stream, out var buffer)) {
+      return (0, Array.Empty<BufferedEntry>());
+    }
+
+    return buffer.TakeSnapshotWithVersion();
+  }
+
+  /// <summary>
   /// Evicts all entries that are at or before the compaction cursor.
   /// Called by the L1 compactor after MarkCompactionComplete.
   /// </summary>
@@ -157,6 +170,13 @@ public sealed class WalHotBuffer
     {
       lock (_lock) {
         return _entries.ToList();
+      }
+    }
+
+    public (long Version, IReadOnlyList<BufferedEntry> Snapshot) TakeSnapshotWithVersion()
+    {
+      lock (_lock) {
+        return (_version, _entries.ToList());
       }
     }
 
