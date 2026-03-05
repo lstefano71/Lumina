@@ -126,9 +126,9 @@ try {
 
             foreach ($row in $rowData) {
                 Write-Host ""
-                Write-Host "  Timestamp: $($row.timestamp)" -ForegroundColor White
-                Write-Host "  Level:     $($row.level)" -ForegroundColor Magenta
-                Write-Host "  Message:   $($row.message)" -ForegroundColor White
+                Write-Host "  Timestamp: $($row._t)" -ForegroundColor White
+                Write-Host "  Level:     $($row._l)" -ForegroundColor Magenta
+                Write-Host "  Message:   $($row._m)" -ForegroundColor White
 
                 if ($row.attributes -and $row.attributes.PSObject.Properties.Count -gt 0) {
                     Write-Host "  Attributes:" -ForegroundColor DarkCyan

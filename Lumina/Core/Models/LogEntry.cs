@@ -18,9 +18,9 @@ public sealed class LogEntry
   public required DateTime Timestamp { get; init; }
 
   /// <summary>
-  /// Gets the log level (e.g., "debug", "info", "warn", "error", "fatal").
+  /// Gets the log level (e.g., "debug", "info", "warn", "error", "fatal"). Optional.
   /// </summary>
-  public required string Level { get; init; }
+  public string? Level { get; init; }
 
   /// <summary>
   /// Gets the log message content.

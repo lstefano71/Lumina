@@ -80,11 +80,11 @@ public class LiveQueryRefreshTests : IDisposable
 
     // Query it back
     var result = await _queryService.ExecuteQueryAsync(
-        "SELECT message, level FROM \"test-stream\" ORDER BY _t");
+        "SELECT _m, _l FROM \"test-stream\" ORDER BY _t");
 
     result.RowCount.Should().Be(1);
-    result.Rows[0]["message"].Should().Be("Hello from hot buffer");
-    result.Rows[0]["level"].Should().Be("info");
+    result.Rows[0]["_m"].Should().Be("Hello from hot buffer");
+    result.Rows[0]["_l"].Should().Be("info");
   }
 
   [Fact]
@@ -187,12 +187,12 @@ public class LiveQueryRefreshTests : IDisposable
     await _queryService.RefreshHotBufferAsync("trace-q-test", snapshot);
 
     var result = await _queryService.ExecuteQueryAsync(
-        "SELECT trace_id, span_id, duration_ms FROM \"trace-q-test\"");
+        "SELECT _traceid, _spanid, _duration_ms FROM \"trace-q-test\"");
 
     result.RowCount.Should().Be(1);
-    result.Rows[0]["trace_id"].Should().Be("trace-123");
-    result.Rows[0]["span_id"].Should().Be("span-456");
-    result.Rows[0]["duration_ms"].Should().Be(250);
+    result.Rows[0]["_traceid"].Should().Be("trace-123");
+    result.Rows[0]["_spanid"].Should().Be("span-456");
+    result.Rows[0]["_duration_ms"].Should().Be(250);
   }
 
   [Fact]
@@ -221,10 +221,10 @@ public class LiveQueryRefreshTests : IDisposable
     await _queryService.RefreshHotBufferAsync("escape-test", snapshot);
 
     var result = await _queryService.ExecuteQueryAsync(
-        "SELECT message FROM \"escape-test\"");
+        "SELECT _m FROM \"escape-test\"");
 
     result.RowCount.Should().Be(1);
-    result.Rows[0]["message"].Should().Be("It's a test with 'quotes'");
+    result.Rows[0]["_m"].Should().Be("It's a test with 'quotes'");
   }
 
   [Fact]

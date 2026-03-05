@@ -58,13 +58,13 @@ public static class SchemaResolver
     var keyCounts = new Dictionary<string, int>();
 
     // Fixed columns
-    columns["stream"] = SchemaType.String;
+    columns["_s"] = SchemaType.String;
     columns["_t"] = SchemaType.Timestamp;
-    columns["level"] = SchemaType.String;
-    columns["message"] = SchemaType.String;
-    columns["trace_id"] = SchemaType.String;
-    columns["span_id"] = SchemaType.String;
-    columns["duration_ms"] = SchemaType.Int32;
+    columns["_l"] = SchemaType.String;
+    columns["_m"] = SchemaType.String;
+    columns["_traceid"] = SchemaType.String;
+    columns["_spanid"] = SchemaType.String;
+    columns["_duration_ms"] = SchemaType.Int32;
 
     // Collect all attribute keys and their types
     foreach (var entry in entries) {
@@ -98,13 +98,13 @@ public static class SchemaResolver
     var result = new List<ColumnSchema>();
 
     // Add fixed columns
-    result.Add(new ColumnSchema { Name = "stream", Type = SchemaType.String, IsNullable = false });
+    result.Add(new ColumnSchema { Name = "_s", Type = SchemaType.String, IsNullable = false });
     result.Add(new ColumnSchema { Name = "_t", Type = SchemaType.Timestamp, IsNullable = false });
-    result.Add(new ColumnSchema { Name = "level", Type = SchemaType.String, IsNullable = false });
-    result.Add(new ColumnSchema { Name = "message", Type = SchemaType.String, IsNullable = false });
-    result.Add(new ColumnSchema { Name = "trace_id", Type = SchemaType.String });
-    result.Add(new ColumnSchema { Name = "span_id", Type = SchemaType.String });
-    result.Add(new ColumnSchema { Name = "duration_ms", Type = SchemaType.Int32 });
+    result.Add(new ColumnSchema { Name = "_l", Type = SchemaType.String, IsNullable = true });
+    result.Add(new ColumnSchema { Name = "_m", Type = SchemaType.String, IsNullable = false });
+    result.Add(new ColumnSchema { Name = "_traceid", Type = SchemaType.String });
+    result.Add(new ColumnSchema { Name = "_spanid", Type = SchemaType.String });
+    result.Add(new ColumnSchema { Name = "_duration_ms", Type = SchemaType.Int32 });
 
     // Add attribute columns (excluding overflow keys)
     foreach (var col in columns) {
@@ -222,7 +222,7 @@ public static class SchemaResolver
 
   private static bool IsFixedColumn(string name)
   {
-    return name is "stream" or "_t" or "level" or "message" or "trace_id" or "span_id" or "duration_ms";
+    return name is "_s" or "_t" or "_l" or "_m" or "_traceid" or "_spanid" or "_duration_ms";
   }
 
   private static bool IsPinnedAttributeKey(string name) => PinnedAttributeKeys.Contains(name);

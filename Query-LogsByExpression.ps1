@@ -13,7 +13,7 @@
 
     Examples:
       .\Query-LogsByExpression.ps1 -Expression "attr1 != null"
-      .\Query-LogsByExpression.ps1 -Expression "level = 'info' and attr2 != null"
+      .\.Query-LogsByExpression.ps1 -Expression "_l = 'info' and attr2 != null"
       .\Query-LogsByExpression.ps1 -Expression "TRY_CAST(split_part(version, '.', 1) AS INTEGER) > 1"
 
 .PARAMETER Expression
@@ -29,10 +29,10 @@
     SQL LIMIT value. Default: 1000.
 
 .PARAMETER StartDate
-    Optional timestamp lower bound (timestamp >= StartDate).
+    Optional timestamp lower bound (_t >= StartDate).
 
 .PARAMETER EndDate
-    Optional timestamp upper bound (timestamp <= EndDate).
+    Optional timestamp upper bound (_t <= EndDate).
 
 .PARAMETER Raw
     Output only JSON response from Lumina.
@@ -132,12 +132,12 @@ $whereParts.Add("($whereExpr)")
 
 if ($StartDate) {
     $startLiteral = Escape-SqlString -Value $StartDate.Value.ToString("yyyy-MM-dd HH:mm:ss.fffffff")
-    $whereParts.Add("timestamp >= TIMESTAMP '$startLiteral'")
+    $whereParts.Add("_t >= TIMESTAMP '$startLiteral'")
 }
 
 if ($EndDate) {
     $endLiteral = Escape-SqlString -Value $EndDate.Value.ToString("yyyy-MM-dd HH:mm:ss.fffffff")
-    $whereParts.Add("timestamp <= TIMESTAMP '$endLiteral'")
+    $whereParts.Add("_t <= TIMESTAMP '$endLiteral'")
 }
 
 $whereClause = "WHERE " + ($whereParts -join " AND ")
@@ -146,7 +146,7 @@ $sql = @"
 SELECT *
 FROM $streamTable
 $whereClause
-ORDER BY timestamp DESC
+ORDER BY _t DESC
 LIMIT $Limit
 "@
 
@@ -210,9 +210,9 @@ try {
 
         foreach ($row in $rows) {
             Write-Host ""
-            Write-Host "  Timestamp: $($row.timestamp)" -ForegroundColor White
-            Write-Host "  Level:     $($row.level)" -ForegroundColor Magenta
-            Write-Host "  Message:   $($row.message)" -ForegroundColor White
+            Write-Host "  Timestamp: $($row._t)" -ForegroundColor White
+            Write-Host "  Level:     $($row._l)" -ForegroundColor Magenta
+            Write-Host "  Message:   $($row._m)" -ForegroundColor White
             Write-Host ("-" * 80) -ForegroundColor DarkGray
         }
     } else {

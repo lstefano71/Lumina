@@ -83,10 +83,10 @@ public sealed class SerializableLogEntry
   public long TimestampTicks { get; set; }
 
   /// <summary>
-  /// Gets or sets the log level.
+  /// Gets or sets the log level. Optional.
   /// </summary>
   [Key(2)]
-  public string Level { get; set; } = string.Empty;
+  public string? Level { get; set; }
 
   /// <summary>
   /// Gets or sets the message content.
@@ -131,7 +131,7 @@ public sealed class SerializableLogEntry
   {
     Stream = entry.Stream;
     TimestampTicks = entry.Timestamp.Ticks;
-    Level = entry.Level;
+    Level = entry.Level;  // nullable – may be null
     Message = entry.Message;
     Attributes = entry.Attributes.Count > 0 ? entry.Attributes : null;
     TraceId = entry.TraceId;
@@ -148,7 +148,7 @@ public sealed class SerializableLogEntry
     return new LogEntry {
       Stream = Stream,
       Timestamp = new DateTime(TimestampTicks, DateTimeKind.Utc),
-      Level = Level,
+      Level = Level,  // nullable – may be null
       Message = Message,
       Attributes = Attributes ?? new Dictionary<string, object?>(),
       TraceId = TraceId,

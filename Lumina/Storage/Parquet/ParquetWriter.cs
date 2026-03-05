@@ -89,13 +89,13 @@ public static class ParquetWriter
 
     foreach (var column in schema) {
       pairs.Add(column.Name switch {
-        "stream" => (CreateDataField("stream", typeof(string), column.IsNullable), entries.Select(e => e.Stream).ToArray()),
+        "_s" => (CreateDataField("_s", typeof(string), column.IsNullable), entries.Select(e => e.Stream).ToArray()),
         "_t" => (new DateTimeDataField("_t", DateTimeFormat.DateAndTimeMicros, isAdjustedToUTC: true, unit: null, isNullable: column.IsNullable), entries.Select(e => e.Timestamp.ToUniversalTime()).ToArray()),
-        "level" => (CreateDataField("level", typeof(string), column.IsNullable), entries.Select(e => e.Level).ToArray()),
-        "message" => (CreateDataField("message", typeof(string), column.IsNullable), entries.Select(e => e.Message).ToArray()),
-        "trace_id" => (CreateDataField("trace_id", typeof(string), column.IsNullable), entries.Select(e => e.TraceId).ToArray()),
-        "span_id" => (CreateDataField("span_id", typeof(string), column.IsNullable), entries.Select(e => e.SpanId).ToArray()),
-        "duration_ms" => (CreateDataField("duration_ms", typeof(int?), column.IsNullable), entries.Select(e => e.DurationMs).ToArray()),
+        "_l" => (CreateDataField("_l", typeof(string), column.IsNullable), entries.Select(e => e.Level).ToArray()),
+        "_m" => (CreateDataField("_m", typeof(string), column.IsNullable), entries.Select(e => e.Message).ToArray()),
+        "_traceid" => (CreateDataField("_traceid", typeof(string), column.IsNullable), entries.Select(e => e.TraceId).ToArray()),
+        "_spanid" => (CreateDataField("_spanid", typeof(string), column.IsNullable), entries.Select(e => e.SpanId).ToArray()),
+        "_duration_ms" => (CreateDataField("_duration_ms", typeof(int?), column.IsNullable), entries.Select(e => e.DurationMs).ToArray()),
         "_meta" => (CreateDataField("_meta", typeof(string), column.IsNullable), BuildMetaValues(entries, overflowKeys)),
         _ => BuildAttributePair(entries, column)
       });

@@ -84,10 +84,12 @@ public static class JsonNormalizer
   };
 
   /// <summary>
-  /// Normalizes log level to lowercase standard format.
+  /// Normalizes log level to lowercase standard format. Returns null if level is null.
   /// </summary>
-  private static string NormalizeLevel(string level)
+  private static string? NormalizeLevel(string? level)
   {
+    if (level is null) return null;
+
     var normalized = level.ToLowerInvariant().Trim();
 
     // Map common variations to standard levels

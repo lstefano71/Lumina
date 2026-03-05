@@ -19,13 +19,13 @@ public class SchemaResolverTests
     var schema = SchemaResolver.ResolveSchema(entries);
 
     var names = schema.Select(c => c.Name).ToList();
-    names.Should().Contain("stream");
+    names.Should().Contain("_s");
     names.Should().Contain("_t");
-    names.Should().Contain("level");
-    names.Should().Contain("message");
-    names.Should().Contain("trace_id");
-    names.Should().Contain("span_id");
-    names.Should().Contain("duration_ms");
+    names.Should().Contain("_l");
+    names.Should().Contain("_m");
+    names.Should().Contain("_traceid");
+    names.Should().Contain("_spanid");
+    names.Should().Contain("_duration_ms");
   }
 
   [Fact]
@@ -33,11 +33,11 @@ public class SchemaResolverTests
   {
     var schema = SchemaResolver.ResolveSchema(new[] { CreateEntry() });
 
-    FindColumn(schema, "stream").Type.Should().Be(SchemaType.String);
+    FindColumn(schema, "_s").Type.Should().Be(SchemaType.String);
     FindColumn(schema, "_t").Type.Should().Be(SchemaType.Timestamp);
-    FindColumn(schema, "level").Type.Should().Be(SchemaType.String);
-    FindColumn(schema, "message").Type.Should().Be(SchemaType.String);
-    FindColumn(schema, "duration_ms").Type.Should().Be(SchemaType.Int32);
+    FindColumn(schema, "_l").Type.Should().Be(SchemaType.String);
+    FindColumn(schema, "_m").Type.Should().Be(SchemaType.String);
+    FindColumn(schema, "_duration_ms").Type.Should().Be(SchemaType.Int32);
   }
 
   [Fact]
@@ -45,10 +45,10 @@ public class SchemaResolverTests
   {
     var schema = SchemaResolver.ResolveSchema(new[] { CreateEntry() });
 
-    FindColumn(schema, "stream").IsNullable.Should().BeFalse();
+    FindColumn(schema, "_s").IsNullable.Should().BeFalse();
     FindColumn(schema, "_t").IsNullable.Should().BeFalse();
-    FindColumn(schema, "level").IsNullable.Should().BeFalse();
-    FindColumn(schema, "message").IsNullable.Should().BeFalse();
+    FindColumn(schema, "_l").IsNullable.Should().BeTrue();
+    FindColumn(schema, "_m").IsNullable.Should().BeFalse();
   }
 
   // --- Dynamic attribute columns ---
@@ -250,7 +250,7 @@ public class SchemaResolverTests
     var schema = SchemaResolver.ResolveSchema(entries);
 
     schema.Select(c => c.Name).Should().BeEquivalentTo(
-        new[] { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms" });
+        new[] { "_s", "_t", "_l", "_m", "_traceid", "_spanid", "_duration_ms" });
   }
 
   [Fact]

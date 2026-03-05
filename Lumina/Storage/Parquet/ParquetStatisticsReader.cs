@@ -25,11 +25,6 @@ public static class ParquetStatisticsReader
       var timeField = dataFields.FirstOrDefault(f => f.Name == "_t");
 
       if (timeField == null) {
-        // Fall back to legacy "timestamp" column for backward compatibility
-        timeField = dataFields.FirstOrDefault(f => f.Name == "timestamp");
-      }
-
-      if (timeField == null) {
         return null;
       }
 

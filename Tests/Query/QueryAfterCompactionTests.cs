@@ -239,8 +239,8 @@ public sealed class QueryAfterCompactionTests : IDisposable
 
     // Also verify content is correct, not just count
     var dataResult = await queryService.ExecuteQueryAsync(
-        $"SELECT message FROM \"{stream}\" ORDER BY _t LIMIT 1");
-    dataResult.Rows[0]["message"].Should().Be("msg-0");
+        $"SELECT _m FROM \"{stream}\" ORDER BY _t LIMIT 1");
+    dataResult.Rows[0]["_m"].Should().Be("msg-0");
   }
 
   [Fact]

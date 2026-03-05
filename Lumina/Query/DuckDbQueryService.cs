@@ -331,7 +331,7 @@ public sealed class DuckDbQueryService : IDisposable
     }
 
     if (!string.IsNullOrEmpty(level)) {
-      conditions.Add($"level = '{level.ToLower()}'");
+      conditions.Add($"_l = '{level.ToLower()}'");
     }
 
     var whereClause = conditions.Count > 0 ? $"WHERE {string.Join(" AND ", conditions)}" : "";
@@ -377,8 +377,8 @@ public sealed class DuckDbQueryService : IDisposable
 
     var sql = $@"
             SELECT * FROM read_parquet([{fileList}],union_by_name=true)
-            WHERE message ILIKE '%{searchTerm}%'
-               OR stream ILIKE '%{searchTerm}%'
+            WHERE _m ILIKE '%{searchTerm}%'
+               OR _s ILIKE '%{searchTerm}%'
             ORDER BY _t DESC
             LIMIT {limit}";
 
@@ -429,14 +429,14 @@ public sealed class DuckDbQueryService : IDisposable
     var sql = $@"
             SELECT 
                 COUNT(*) as total_count,
-                COUNT(DISTINCT level) as level_count,
+                COUNT(DISTINCT _l) as level_count,
                 MIN(_t) as earliest_timestamp,
                 MAX(_t) as latest_timestamp,
-                level,
+                _l,
                 COUNT(*) as count_by_level
             FROM read_parquet([{fileList}],union_by_name=true)
             {whereClause}
-            GROUP BY level
+            GROUP BY _l
             ORDER BY count_by_level DESC";
 
     return await ExecuteQueryAsync(sql, cancellationToken);
@@ -497,7 +497,7 @@ public sealed class DuckDbQueryService : IDisposable
       var hasOverflow = schema.Any(c => c.IsOverflow);
 
       // Build the INSERT column list.
-      var colParts = new List<string> { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms" };
+      var colParts = new List<string> { "_s", "_t", "_l", "_m", "_traceid", "_spanid", "_duration_ms" };
       foreach (var dc in dynamicCols) colParts.Add($"\"{dc.Name}\"");
       if (hasOverflow) colParts.Add("_meta");
       var colList = string.Join(", ", colParts);
@@ -526,7 +526,7 @@ public sealed class DuckDbQueryService : IDisposable
           sb.Append(", ");
           sb.Append($"'{e.Timestamp:yyyy-MM-dd HH:mm:ss.fffffff}'::TIMESTAMP");
           sb.Append(", ");
-          sb.Append($"'{EscapeSqlString(e.Level)}'");
+          sb.Append(e.Level != null ? $"'{EscapeSqlString(e.Level)}'" : "NULL");
           sb.Append(", ");
           sb.Append($"'{EscapeSqlString(e.Message)}'");
           sb.Append(", ");
@@ -607,13 +607,13 @@ public sealed class DuckDbQueryService : IDisposable
   /// </summary>
   private static IReadOnlyList<ColumnSchema> GetFixedHotSchema() =>
   [
-    new ColumnSchema { Name = "stream",      Type = SchemaType.String,    IsNullable = false },
+    new ColumnSchema { Name = "_s",          Type = SchemaType.String,    IsNullable = false },
     new ColumnSchema { Name = "_t",          Type = SchemaType.Timestamp, IsNullable = false },
-    new ColumnSchema { Name = "level",       Type = SchemaType.String,    IsNullable = false },
-    new ColumnSchema { Name = "message",     Type = SchemaType.String,    IsNullable = false },
-    new ColumnSchema { Name = "trace_id",    Type = SchemaType.String,    IsNullable = true  },
-    new ColumnSchema { Name = "span_id",     Type = SchemaType.String,    IsNullable = true  },
-    new ColumnSchema { Name = "duration_ms", Type = SchemaType.Int32,     IsNullable = true  },
+    new ColumnSchema { Name = "_l",          Type = SchemaType.String,    IsNullable = true  },
+    new ColumnSchema { Name = "_m",          Type = SchemaType.String,    IsNullable = false },
+    new ColumnSchema { Name = "_traceid",    Type = SchemaType.String,    IsNullable = true  },
+    new ColumnSchema { Name = "_spanid",     Type = SchemaType.String,    IsNullable = true  },
+    new ColumnSchema { Name = "_duration_ms", Type = SchemaType.Int32,    IsNullable = true  },
   ];
 
   /// <summary>Maps a <see cref="SchemaType"/> to a DuckDB SQL type name.</summary>
@@ -644,7 +644,7 @@ public sealed class DuckDbQueryService : IDisposable
 
   /// <summary>Returns true for column names that are always present in the fixed hot-table base.</summary>
   private static bool IsFixedBaseColumn(string name) =>
-    name is "stream" or "_t" or "level" or "message" or "trace_id" or "span_id" or "duration_ms";
+    name is "_s" or "_t" or "_l" or "_m" or "_traceid" or "_spanid" or "_duration_ms";
 
   /// <summary>
   /// Clears the hot table for a stream (called after compaction).

@@ -12,7 +12,7 @@ namespace Lumina.Storage.Parquet;
 public static class ParquetReader
 {
   private static readonly HashSet<string> FixedColumns =
-      new() { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms", "_meta" };
+      new() { "_s", "_t", "_l", "_m", "_traceid", "_spanid", "_duration_ms", "_meta" };
 
   /// <summary>
   /// Reads all log entries from a Parquet file.
@@ -51,13 +51,13 @@ public static class ParquetReader
         cancellationToken.ThrowIfCancellationRequested();
 
         var entry = new LogEntry {
-          Stream = GetString(columns, "stream", i) ?? "unknown",
+          Stream = GetString(columns, "_s", i) ?? "unknown",
           Timestamp = GetDateTime(columns, "_t", i) ?? DateTime.UtcNow,
-          Level = GetString(columns, "level", i) ?? "info",
-          Message = GetString(columns, "message", i) ?? "",
-          TraceId = GetString(columns, "trace_id", i),
-          SpanId = GetString(columns, "span_id", i),
-          DurationMs = GetNullableInt(columns, "duration_ms", i),
+          Level = GetString(columns, "_l", i),
+          Message = GetString(columns, "_m", i) ?? "",
+          TraceId = GetString(columns, "_traceid", i),
+          SpanId = GetString(columns, "_spanid", i),
+          DurationMs = GetNullableInt(columns, "_duration_ms", i),
           Attributes = new Dictionary<string, object?>()
         };
 

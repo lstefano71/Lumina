@@ -60,19 +60,19 @@ $entries = for ($i = 1; $i -le $Count; $i++) {
   $attributes['version'] = "{0}.{1}.{2}" -f (Get-Random -Minimum 0 -Maximum 4), (Get-Random -Minimum 0 -Maximum 10), (Get-Random -Minimum 0 -Maximum 100)
 
   $entry = @{
-    stream = $Stream
-    level = $level
-    message = $message
+    '_s' = $Stream
+    '_l' = $level
+    '_m' = $message
     attributes = $attributes
   }
 
   if ($IncludeTrace) {
     if ((Get-Random -Maximum 4) -eq 0) {
-      $entry.traceId = [guid]::NewGuid().ToString()
-      $entry.spanId = [guid]::NewGuid().ToString().Substring(0,8)
-      $entry.durationMs = Get-Random -Minimum 1 -Maximum $MaxDurationMs
+      $entry._traceid = [guid]::NewGuid().ToString()
+      $entry._spanid = [guid]::NewGuid().ToString().Substring(0,8)
+      $entry._duration_ms = Get-Random -Minimum 1 -Maximum $MaxDurationMs
     } elseif ((Get-Random -Maximum 3) -eq 0) {
-      $entry.traceId = [guid]::NewGuid().ToString()
+      $entry._traceid = [guid]::NewGuid().ToString()
     }
   }
 
@@ -85,7 +85,7 @@ if ($Batch) {
   for ($start = 0; $start -lt $total; $start += $BatchSize) {
     $end = [math]::Min($start + $BatchSize - 1, $total - 1)
     $chunk = $arr[$start..$end]
-    $payload = @{ stream = $Stream; entries = $chunk }
+    $payload = @{ '_s' = $Stream; entries = $chunk }
     $json = $payload | ConvertTo-Json -Depth 10
     Invoke-RestMethod -Uri "$BaseUrl/v1/logs/batch" -Method Post -ContentType 'application/json' -Body $json
     Start-Sleep -Milliseconds (Get-Random -Minimum 50 -Maximum 250)
