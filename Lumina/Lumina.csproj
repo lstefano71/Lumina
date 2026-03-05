@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <PackageReference Include="Apache.Arrow" Version="*" />
+    <PackageReference Include="DotNext.Threading" Version="5.*" />
     <PackageReference Include="Parquet.Net" Version="*" />
     <PackageReference Include="DuckDB.NET.Data.Full" Version="*" />
     <PackageReference Include="MessagePack" Version="3.*" />

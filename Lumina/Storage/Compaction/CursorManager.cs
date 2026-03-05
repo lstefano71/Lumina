@@ -130,29 +130,47 @@ public sealed class CursorManager
       long? walFileSize = null,
       int? parquetEntryCount = null)
   {
-    var cursor = GetCursor(stream);
-
-    bool shouldUpdate = false;
-    if (cursor.LastCompactedWalFile == null) {
-      shouldUpdate = true;
-    } else {
-      int cmp = string.Compare(lastWalFile, cursor.LastCompactedWalFile, StringComparison.Ordinal);
-      if (cmp > 0) {
-        shouldUpdate = true;
-      } else if (cmp == 0 && lastOffset > cursor.LastCompactedOffset) {
-        shouldUpdate = true;
+    // Hold the lock for the entire read-evaluate-update sequence to prevent
+    // two concurrent compaction completions from losing each other's updates.
+    lock (_lock) {
+      CompactionCursor cursor;
+      if (_cursors.TryGetValue(stream, out var existing)) {
+        cursor = new CompactionCursor {
+          Stream = existing.Stream,
+          LastCompactedWalFile = existing.LastCompactedWalFile,
+          LastCompactedOffset = existing.LastCompactedOffset,
+          LastCompactionTime = existing.LastCompactionTime,
+          LastParquetFile = existing.LastParquetFile,
+          LastWalFileSize = existing.LastWalFileSize,
+          LastParquetEntryCount = existing.LastParquetEntryCount
+        };
+      } else {
+        cursor = new CompactionCursor { Stream = stream };
       }
-    }
 
-    if (shouldUpdate) {
-      cursor.LastCompactedWalFile = lastWalFile;
-      cursor.LastCompactedOffset = lastOffset;
-      cursor.LastParquetFile = parquetFile;
-      cursor.LastCompactionTime = DateTime.UtcNow;
-      cursor.LastWalFileSize = walFileSize;
-      cursor.LastParquetEntryCount = parquetEntryCount;
+      bool shouldUpdate = false;
+      if (cursor.LastCompactedWalFile == null) {
+        shouldUpdate = true;
+      } else {
+        int cmp = string.Compare(lastWalFile, cursor.LastCompactedWalFile, StringComparison.Ordinal);
+        if (cmp > 0) {
+          shouldUpdate = true;
+        } else if (cmp == 0 && lastOffset > cursor.LastCompactedOffset) {
+          shouldUpdate = true;
+        }
+      }
 
-      UpdateCursor(cursor);
+      if (shouldUpdate) {
+        cursor.LastCompactedWalFile = lastWalFile;
+        cursor.LastCompactedOffset = lastOffset;
+        cursor.LastParquetFile = parquetFile;
+        cursor.LastCompactionTime = DateTime.UtcNow;
+        cursor.LastWalFileSize = walFileSize;
+        cursor.LastParquetEntryCount = parquetEntryCount;
+
+        _cursors[cursor.Stream] = cursor;
+        SaveCursor(cursor);
+      }
     }
   }
 

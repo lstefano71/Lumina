@@ -32,6 +32,7 @@ public sealed class DuckDbQueryService : IDisposable
   private readonly ParquetManager _parquetManager;
   private readonly ILogger<DuckDbQueryService> _logger;
   private readonly StreamLockManager _streamLockManager;
+  private readonly SemaphoreSlim _dbLock = new(1, 1);
   private DuckDBConnection? _connection;
   private bool _disposed;
   private readonly HashSet<string> _registeredStreams = new(StringComparer.OrdinalIgnoreCase);
@@ -206,35 +207,40 @@ public sealed class DuckDbQueryService : IDisposable
     var columns = new List<string>();
 
     try {
-      using var command = _connection!.CreateCommand();
-      command.CommandText = sql;
+      await _dbLock.WaitAsync(cancellationToken);
+      try {
+        using var command = _connection!.CreateCommand();
+        command.CommandText = sql;
 
-      // Add parameters if provided
-      if (parameters != null) {
-        foreach (var (name, value) in parameters) {
-          var paramName = name.StartsWith("$") ? name : $"${name}";
-          var duckDbParam = new DuckDBParameter(paramName, value ?? DBNull.Value);
-          command.Parameters.Add(duckDbParam);
+        // Add parameters if provided
+        if (parameters != null) {
+          foreach (var (name, value) in parameters) {
+            var paramName = name.StartsWith("$") ? name : $"${name}";
+            var duckDbParam = new DuckDBParameter(paramName, value ?? DBNull.Value);
+            command.Parameters.Add(duckDbParam);
+          }
         }
-      }
 
-      using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-      // Get column names
-      for (int i = 0; i < reader.FieldCount; i++) {
-        columns.Add(reader.GetName(i));
-      }
-
-      // Read rows
-      while (await reader.ReadAsync(cancellationToken)) {
-        var row = new Dictionary<string, object?>();
-
+        // Get column names
         for (int i = 0; i < reader.FieldCount; i++) {
-          var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
-          row[columns[i]] = value;
+          columns.Add(reader.GetName(i));
         }
 
-        rows.Add(row);
+        // Read rows
+        while (await reader.ReadAsync(cancellationToken)) {
+          var row = new Dictionary<string, object?>();
+
+          for (int i = 0; i < reader.FieldCount; i++) {
+            var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            row[columns[i]] = value;
+          }
+
+          rows.Add(row);
+        }
+      } finally {
+        _dbLock.Release();
       }
     } catch (Exception ex) {
       _logger.LogError(ex, "Query execution failed: {SQL}", sql);
@@ -270,6 +276,7 @@ public sealed class DuckDbQueryService : IDisposable
       await InitializeAsync(cancellationToken);
     }
 
+    await _dbLock.WaitAsync(cancellationToken);
     try {
       using var command = _connection!.CreateCommand();
       command.CommandText = sql;
@@ -277,6 +284,8 @@ public sealed class DuckDbQueryService : IDisposable
     } catch (Exception ex) {
       _logger.LogError(ex, "Non-query execution failed: {SQL}", sql);
       throw;
+    } finally {
+      _dbLock.Release();
     }
   }
 
@@ -724,5 +733,6 @@ public sealed class DuckDbQueryService : IDisposable
 
     _disposed = true;
     _connection?.Dispose();
+    _dbLock.Dispose();
   }
 }

@@ -2,6 +2,8 @@ using Lumina.Core.Configuration;
 using Lumina.Core.Models;
 using Lumina.Storage.Serialization;
 
+using Microsoft.Win32.SafeHandles;
+
 using System.Buffers;
 
 namespace Lumina.Storage.Wal;
@@ -12,6 +14,7 @@ namespace Lumina.Storage.Wal;
 public sealed class WalWriter : IAsyncDisposable
 {
   private readonly FileStream _fileStream;
+  private readonly SafeFileHandle _handle;
   private readonly WalSettings _settings;
   private readonly string _filePath;
   private readonly string _stream;
@@ -25,9 +28,9 @@ public sealed class WalWriter : IAsyncDisposable
   public string FilePath => _filePath;
 
   /// <summary>
-  /// Gets the current file size in bytes.
+  /// Gets the current file size in bytes (tracks the logical write position).
   /// </summary>
-  public long FileSize => _fileStream.Length;
+  public long FileSize => Interlocked.Read(ref _currentOffset);
 
   /// <summary>
   /// Gets the stream name this writer belongs to.
@@ -44,6 +47,7 @@ public sealed class WalWriter : IAsyncDisposable
   private WalWriter(FileStream fileStream, string filePath, string stream, WalSettings settings, bool createNew)
   {
     _fileStream = fileStream;
+    _handle = fileStream.SafeFileHandle;
     _filePath = filePath;
     _stream = stream;
     _settings = settings;
@@ -114,12 +118,13 @@ public sealed class WalWriter : IAsyncDisposable
       // Write payload
       payload.CopyTo(buffer, WalFrameHeader.Size);
 
-      var offset = _currentOffset;
+      // Atomically reserve space in the file so concurrent writers
+      // each get their own non-overlapping region.
+      var offset = Interlocked.Add(ref _currentOffset, totalSize) - totalSize;
 
-      await _fileStream.WriteAsync(buffer.AsMemory(0, totalSize), cancellationToken);
+      // Write at the reserved offset (safe for concurrent callers).
+      await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), offset, cancellationToken);
       await _fileStream.FlushAsync(cancellationToken);
-
-      _currentOffset += totalSize;
 
       return offset;
     } finally {
@@ -156,10 +161,13 @@ public sealed class WalWriter : IAsyncDisposable
     var offsets = new long[entries.Count];
 
     try {
+      // Atomically reserve the entire block for all entries at once.
+      var baseOffset = Interlocked.Add(ref _currentOffset, totalSize) - totalSize;
+
       var bufferOffset = 0;
 
       for (int i = 0; i < entries.Count; i++) {
-        offsets[i] = _currentOffset;
+        offsets[i] = baseOffset + bufferOffset;
 
         var frameHeader = new WalFrameHeader((uint)payloads[i].Length, WalEntryType.StandardLog);
         frameHeader.WriteTo(buffer.AsSpan(bufferOffset, WalFrameHeader.Size));
@@ -167,11 +175,10 @@ public sealed class WalWriter : IAsyncDisposable
 
         payloads[i].CopyTo(buffer, bufferOffset);
         bufferOffset += payloads[i].Length;
-
-        _currentOffset += WalFrameHeader.Size + payloads[i].Length;
       }
 
-      await _fileStream.WriteAsync(buffer.AsMemory(0, totalSize), cancellationToken);
+      // Write at the reserved offset (safe for concurrent callers).
+      await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), baseOffset, cancellationToken);
       await _fileStream.FlushAsync(cancellationToken);
 
       return offsets;
@@ -205,7 +212,9 @@ public sealed class WalWriter : IAsyncDisposable
     var buffer = new byte[WalFileHeader.Size];
     header.WriteTo(buffer);
 
-    await _fileStream.WriteAsync(buffer, cancellationToken);
+    // Header is written once during CreateAsync before the writer is
+    // shared, so no contention here.
+    await RandomAccess.WriteAsync(_handle, buffer, 0, cancellationToken);
     await _fileStream.FlushAsync(cancellationToken);
     _currentOffset = WalFileHeader.Size;
     _headerWritten = true;
