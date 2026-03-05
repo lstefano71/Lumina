@@ -217,6 +217,15 @@ public class TickExpressionParserTests
   }
 
   [Fact]
+  public void Parse_BracketedRangeWithTimezoneSuffix_Works()
+  {
+    var r = ParseSingle("[$now - 2h..$now]@America/New_York");
+
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 6, 0, 0, TimeSpan.FromHours(-4)), r.Start);
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 8, 0, 0, TimeSpan.FromHours(-4)), r.End);
+  }
+
+  [Fact]
   public void Parse_DateOnly_WithIanaTimezone_ResolvesToZoneOffset()
   {
     var r = ParseSingle("2025-01-10@Europe/Rome");

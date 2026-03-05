@@ -544,7 +544,7 @@ public static class TickExpressionParser
 
       // --- Top-level bracket: date list like [$today, $yesterday, 2024-01-15] ---
       if (Peek(tokens, pos) == TokenKind.LBracket) {
-        node = ParseBracketedList(tokens, ref pos);
+        node = ParseBracketedRangeOrList(tokens, ref pos);
         if (node == null) return null;
       }
       // --- ISO literal that might contain bracket expansion ---
@@ -834,10 +834,33 @@ public static class TickExpressionParser
       return null;
     }
 
-    private static AstNode? ParseBracketedList(List<Token> tokens, ref int pos)
+    private static AstNode? ParseBracketedRangeOrList(List<Token> tokens, ref int pos)
     {
       pos++; // consume [
 
+      var contentStart = pos;
+
+      var left = ParseAnchorExpr(tokens, ref pos);
+      if (left != null && pos < tokens.Count && Peek(tokens, pos) == TokenKind.DotDot) {
+        pos++; // consume ..
+        var right = ParseAnchorExpr(tokens, ref pos);
+        if (right == null)
+          return null;
+
+        if (pos >= tokens.Count || Peek(tokens, pos) != TokenKind.RBracket)
+          return null;
+        pos++; // consume ]
+
+        return new RangeNode(left, right);
+      }
+
+      // Fallback: parse as date list
+      pos = contentStart;
+      return ParseBracketedListContents(tokens, ref pos);
+    }
+
+    private static AstNode? ParseBracketedListContents(List<Token> tokens, ref int pos)
+    {
       var items = new List<AstNode>();
 
       while (pos < tokens.Count && Peek(tokens, pos) != TokenKind.RBracket) {
@@ -923,6 +946,11 @@ public static class TickExpressionParser
       if (pos < tokens.Count && Peek(tokens, pos) == TokenKind.Timezone) {
         var tz = tokens[pos].Text;
         pos++;
+
+        if (node is RangeNode rangeNode) {
+          return new RangeNode(new TimezoneNode(rangeNode.Start, tz), new TimezoneNode(rangeNode.End, tz));
+        }
+
         return new TimezoneNode(node, tz);
       }
 
