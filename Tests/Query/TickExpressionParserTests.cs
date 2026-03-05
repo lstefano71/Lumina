@@ -208,6 +208,43 @@ public class TickExpressionParserTests
   }
 
   [Fact]
+  public void Parse_DateOnly_WithIanaTimezone_ResolvesToZoneOffset()
+  {
+    var r = ParseSingle("2025-01-10@Europe/Rome");
+
+    Assert.Equal(new DateTimeOffset(2025, 1, 10, 0, 0, 0, TimeSpan.FromHours(1)), r.Start);
+    Assert.Equal(new DateTimeOffset(2025, 1, 10, 23, 59, 59, TimeSpan.FromHours(1)).AddTicks(9_999_990), r.End);
+  }
+
+  [Fact]
+  public void Parse_Now_WithIanaTimezone_ConvertsInstant()
+  {
+    var r = ParseSingle("$now@Europe/Rome");
+
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 14, 0, 0, TimeSpan.FromHours(2)), r.Start);
+  }
+
+  [Fact]
+  public void Parse_IanaTimezone_DstSpringForward_InvalidLocalTime_ShiftsForwardToValid()
+  {
+    var r = ParseSingle("2025-03-30T02:30@Europe/Rome");
+
+    // 02:30 does not exist on DST spring-forward day; parser shifts to 03:00 CEST.
+    Assert.Equal(new DateTimeOffset(2025, 3, 30, 3, 0, 0, TimeSpan.FromHours(2)), r.Start);
+    Assert.Equal(r.Start, r.End);
+  }
+
+  [Fact]
+  public void Parse_IanaTimezone_DstFallBack_AmbiguousLocalTime_ChoosesLargerOffset()
+  {
+    var r = ParseSingle("2025-10-26T02:30@Europe/Rome");
+
+    // 02:30 is ambiguous on DST fall-back day; parser picks larger offset (+02:00).
+    Assert.Equal(new DateTimeOffset(2025, 10, 26, 2, 30, 0, TimeSpan.FromHours(2)), r.Start);
+    Assert.Equal(r.Start, r.End);
+  }
+
+  [Fact]
   public void Parse_DateList_WithPerElementTimezone_Works()
   {
     var intervals = ParseMulti("[2024-01-15@UTC,2024-01-17@+02:00]");

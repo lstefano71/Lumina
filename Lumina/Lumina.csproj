@@ -26,5 +26,6 @@
     <PackageReference Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="*-*" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="*" />
     <PackageReference Include="Serilog.AspNetCore" Version="*" />
+    <PackageReference Include="TimeZoneConverter" Version="*" />
   </ItemGroup>
 </Project>

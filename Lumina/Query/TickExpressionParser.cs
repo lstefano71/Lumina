@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 
+using TimeZoneConverter;
+
 namespace Lumina.Query;
 
 /// <summary>
@@ -861,6 +863,7 @@ public static class TickExpressionParser
   internal static class Evaluator
   {
     private readonly record struct Anchor(DateTimeOffset Value, bool IsDateOnly);
+    private readonly record struct TimezoneResolution(TimeZoneInfo? Zone, TimeSpan FixedOffset, bool IsFixedOffset);
 
     public static List<(DateTimeOffset Start, DateTimeOffset End)> Evaluate(AstNode node, DateTimeOffset now)
     {
@@ -1014,16 +1017,17 @@ public static class TickExpressionParser
 
     private static List<Anchor> EvaluateAnchorsInTimezone(AstNode inner, string timezoneToken, DateTimeOffset now)
     {
-      if (!TryResolveTimezoneOffset(timezoneToken, now, out var targetOffset))
+      if (!TryResolveTimezone(timezoneToken, out var resolution))
         return new List<Anchor>();
 
       if (inner is VariableNode vn) {
-        var zonedNow = now.ToOffset(targetOffset);
+        var zonedNow = ConvertInstantToTimezone(now, resolution);
+        var localStart = new DateTime(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, DateTimeKind.Unspecified);
         return vn.Name switch {
           "$now" => new List<Anchor> { new(zonedNow, false) },
-          "$today" => new List<Anchor> { new(new DateTimeOffset(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, targetOffset), true) },
-          "$yesterday" => new List<Anchor> { new(new DateTimeOffset(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, targetOffset).AddDays(-1), true) },
-          "$tomorrow" => new List<Anchor> { new(new DateTimeOffset(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, targetOffset).AddDays(1), true) },
+          "$today" => new List<Anchor> { new(ConvertLocalDateTimeToTimezone(localStart, resolution), true) },
+          "$yesterday" => new List<Anchor> { new(ConvertLocalDateTimeToTimezone(localStart.AddDays(-1), resolution), true) },
+          "$tomorrow" => new List<Anchor> { new(ConvertLocalDateTimeToTimezone(localStart.AddDays(1), resolution), true) },
           _ => new List<Anchor>()
         };
       }
@@ -1033,50 +1037,53 @@ public static class TickExpressionParser
           return new List<Anchor>();
 
         if (isDateOnly) {
-          var localMidnight = new DateTimeOffset(parsed.Year, parsed.Month, parsed.Day, 0, 0, 0, targetOffset);
-          return new List<Anchor> { new(localMidnight, true) };
+          var localMidnight = new DateTime(parsed.Year, parsed.Month, parsed.Day, 0, 0, 0, DateTimeKind.Unspecified);
+          var zonedMidnight = ConvertLocalDateTimeToTimezone(localMidnight, resolution);
+          return new List<Anchor> { new(zonedMidnight, true) };
         }
 
         // Literal with explicit offset/zone keeps its instant; otherwise interpret local clock in target offset.
         if (HasExplicitOffset(lit.Text))
-          return new List<Anchor> { new(parsed.ToOffset(targetOffset), false) };
+          return new List<Anchor> { new(ConvertInstantToTimezone(parsed, resolution), false) };
 
-        var local = new DateTimeOffset(parsed.Year, parsed.Month, parsed.Day, parsed.Hour, parsed.Minute, parsed.Second, targetOffset).AddTicks(parsed.TimeOfDay.Ticks % TimeSpan.TicksPerSecond);
-        return new List<Anchor> { new(local, false) };
+        var localDateTime = new DateTime(parsed.Year, parsed.Month, parsed.Day, parsed.Hour, parsed.Minute, parsed.Second, DateTimeKind.Unspecified)
+            .AddTicks(parsed.TimeOfDay.Ticks % TimeSpan.TicksPerSecond);
+        return new List<Anchor> { new(ConvertLocalDateTimeToTimezone(localDateTime, resolution), false) };
       }
 
       var baseAnchors = EvaluateAnchors(inner, now);
-      return baseAnchors.Select(a => new Anchor(a.Value.ToOffset(targetOffset), a.IsDateOnly)).ToList();
+      return baseAnchors.Select(a => new Anchor(ConvertInstantToTimezone(a.Value, resolution), a.IsDateOnly)).ToList();
     }
 
-    private static bool TryResolveTimezoneOffset(string timezoneToken, DateTimeOffset now, out TimeSpan offset)
+    private static bool TryResolveTimezone(string timezoneToken, out TimezoneResolution resolution)
     {
-      offset = default;
+      resolution = default;
       var tz = timezoneToken.Trim();
       if (tz.StartsWith("@", StringComparison.Ordinal))
         tz = tz[1..];
 
       if (tz.Equals("UTC", StringComparison.OrdinalIgnoreCase) ||
           tz.Equals("Z", StringComparison.OrdinalIgnoreCase)) {
-        offset = TimeSpan.Zero;
+        resolution = new TimezoneResolution(null, TimeSpan.Zero, true);
         return true;
       }
 
       if (tz.Equals("local", StringComparison.OrdinalIgnoreCase)) {
-        offset = TimeZoneInfo.Local.GetUtcOffset(now.UtcDateTime);
+        resolution = new TimezoneResolution(TimeZoneInfo.Local, default, false);
         return true;
       }
 
       if (Regex.IsMatch(tz, @"^[+-]\d{2}:\d{2}$", RegexOptions.CultureInvariant)) {
         if (TimeSpan.TryParseExact(tz[1..], "hh\\:mm", CultureInfo.InvariantCulture, out var parsedColon)) {
-          offset = tz[0] == '-' ? -parsedColon : parsedColon;
+          var fixedOffset = tz[0] == '-' ? -parsedColon : parsedColon;
+          resolution = new TimezoneResolution(null, fixedOffset, true);
           return true;
         }
       }
 
       if (Regex.IsMatch(tz, @"^[+-]\d{2}$", RegexOptions.CultureInvariant)) {
         if (int.TryParse(tz, NumberStyles.Integer, CultureInfo.InvariantCulture, out var h)) {
-          offset = TimeSpan.FromHours(h);
+          resolution = new TimezoneResolution(null, TimeSpan.FromHours(h), true);
           return true;
         }
       }
@@ -1085,12 +1092,68 @@ public static class TickExpressionParser
         var sign = tz[0] == '-' ? -1 : 1;
         if (int.TryParse(tz.Substring(1, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out var hh) &&
             int.TryParse(tz.Substring(3, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out var mm)) {
-          offset = new TimeSpan(sign * hh, sign * mm, 0);
+          resolution = new TimezoneResolution(null, new TimeSpan(sign * hh, sign * mm, 0), true);
           return true;
         }
       }
 
+      if (TryGetTimeZoneInfo(tz, out var zone)) {
+        resolution = new TimezoneResolution(zone, default, false);
+        return true;
+      }
+
       return false;
+    }
+
+    private static bool TryGetTimeZoneInfo(string zoneId, out TimeZoneInfo zone)
+    {
+      try {
+        zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        return true;
+      } catch (TimeZoneNotFoundException) {
+      } catch (InvalidTimeZoneException) {
+      }
+
+      try {
+        zone = TZConvert.GetTimeZoneInfo(zoneId);
+        return true;
+      } catch (TimeZoneNotFoundException) {
+      } catch (InvalidTimeZoneException) {
+      }
+
+      zone = default!;
+      return false;
+    }
+
+    private static DateTimeOffset ConvertInstantToTimezone(DateTimeOffset instant, TimezoneResolution resolution)
+    {
+      if (resolution.IsFixedOffset)
+        return instant.ToOffset(resolution.FixedOffset);
+
+      return TimeZoneInfo.ConvertTime(instant, resolution.Zone!);
+    }
+
+    private static DateTimeOffset ConvertLocalDateTimeToTimezone(DateTime localDateTime, TimezoneResolution resolution)
+    {
+      if (resolution.IsFixedOffset)
+        return new DateTimeOffset(localDateTime, resolution.FixedOffset);
+
+      var zone = resolution.Zone!;
+      var normalized = localDateTime;
+
+      // Shift forward for invalid local times during DST spring-forward transitions.
+      while (zone.IsInvalidTime(normalized)) {
+        normalized = normalized.AddMinutes(1);
+      }
+
+      if (zone.IsAmbiguousTime(normalized)) {
+        // Prefer the larger offset (typically DST offset) for deterministic behavior.
+        var ambiguous = zone.GetAmbiguousTimeOffsets(normalized);
+        var preferred = ambiguous[0] >= ambiguous[1] ? ambiguous[0] : ambiguous[1];
+        return new DateTimeOffset(normalized, preferred);
+      }
+
+      return new DateTimeOffset(normalized, zone.GetUtcOffset(normalized));
     }
 
     private static bool HasExplicitOffset(string text)

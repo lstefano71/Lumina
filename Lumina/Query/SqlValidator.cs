@@ -320,12 +320,12 @@ public static class SqlValidator
     return AllowedReadFunctions.Contains(functionName);
   }
 
-    // Matches: <identifier> IN '<tick expression candidate>'
-    //
-    // We intentionally match any single-quoted IN literal and then delegate to
-    // TickExpressionParser. If parsing fails, the expression is left untouched.
-    // This enables bracket-only forms (e.g. 2026-03-[05,06]) and other QuestDB
-    // TICK variants that do not include $, .., or ; tokens.
+  // Matches: <identifier> IN '<tick expression candidate>'
+  //
+  // We intentionally match any single-quoted IN literal and then delegate to
+  // TickExpressionParser. If parsing fails, the expression is left untouched.
+  // This enables bracket-only forms (e.g. 2026-03-[05,06]) and other QuestDB
+  // TICK variants that do not include $, .., or ; tokens.
   private static readonly Regex TickInPattern = new(
       @"(?<col>[A-Za-z_][A-Za-z0-9_.]*|""[^""]+"")\s+[Ii][Nn]\s+'(?<tick>[^']+)'",
       RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -366,9 +366,11 @@ public static class SqlValidator
               out IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> intervals))
         return match.Value; // leave unrecognised expressions untouched
 
-      if (intervals.Count == 1) {
-        var start = TickExpressionParser.FormatTimestamp(intervals[0].Start);
-        var end = TickExpressionParser.FormatTimestamp(intervals[0].End);
+      var coalesced = CoalesceContiguousIntervals(intervals);
+
+      if (coalesced.Count == 1) {
+        var start = TickExpressionParser.FormatTimestamp(coalesced[0].Start);
+        var end = TickExpressionParser.FormatTimestamp(coalesced[0].End);
         if (useEpochRewrite)
           return $"(epoch_us(try_cast({col} AS TIMESTAMP_NS)) >= epoch_us(CAST('{start}' AS TIMESTAMP_NS)) AND epoch_us(try_cast({col} AS TIMESTAMP_NS)) < epoch_us(CAST('{end}' AS TIMESTAMP_NS)))";
 
@@ -378,10 +380,10 @@ public static class SqlValidator
       // Multiple intervals → parenthesised OR chain
       var parts = new System.Text.StringBuilder();
       parts.Append('(');
-      for (int i = 0; i < intervals.Count; i++) {
+      for (int i = 0; i < coalesced.Count; i++) {
         if (i > 0) parts.Append(" OR ");
-        var s = TickExpressionParser.FormatTimestamp(intervals[i].Start);
-        var e = TickExpressionParser.FormatTimestamp(intervals[i].End);
+        var s = TickExpressionParser.FormatTimestamp(coalesced[i].Start);
+        var e = TickExpressionParser.FormatTimestamp(coalesced[i].End);
         if (useEpochRewrite)
           parts.Append($"(epoch_us(try_cast({col} AS TIMESTAMP_NS)) >= epoch_us(CAST('{s}' AS TIMESTAMP_NS)) AND epoch_us(try_cast({col} AS TIMESTAMP_NS)) < epoch_us(CAST('{e}' AS TIMESTAMP_NS)))");
         else
@@ -390,6 +392,30 @@ public static class SqlValidator
       parts.Append(')');
       return parts.ToString();
     });
+  }
+
+  private static List<(DateTimeOffset Start, DateTimeOffset End)> CoalesceContiguousIntervals(
+      IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> intervals)
+  {
+    if (intervals.Count <= 1)
+      return intervals.ToList();
+
+    var sorted = intervals.OrderBy(i => i.Start).ToList();
+    var merged = new List<(DateTimeOffset Start, DateTimeOffset End)> { sorted[0] };
+
+    for (int i = 1; i < sorted.Count; i++) {
+      var last = merged[^1];
+      var cur = sorted[i];
+
+      // Treat microsecond-adjacent windows as one continuous interval for SQL emission.
+      if (cur.Start <= last.End.AddTicks(10)) {
+        merged[^1] = (last.Start, cur.End > last.End ? cur.End : last.End);
+      } else {
+        merged.Add(cur);
+      }
+    }
+
+    return merged;
   }
 
   // Matches: FROM/JOIN 'stream-name' (single-quoted identifier in a table reference position)
