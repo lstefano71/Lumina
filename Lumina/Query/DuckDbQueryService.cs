@@ -268,15 +268,20 @@ public sealed class DuckDbQueryService : IDisposable
 
     await _dbLock.WaitAsync(cancellationToken);
     try {
-      using var command = _connection!.CreateCommand();
-      command.CommandText = sql;
-      await command.ExecuteNonQueryAsync(cancellationToken);
+      await ExecuteNonQueryNoLockAsync(sql, cancellationToken);
     } catch (Exception ex) {
       _logger.LogError(ex, "Non-query execution failed: {SQL}", sql);
       throw;
     } finally {
       _dbLock.Release();
     }
+  }
+
+  private async Task ExecuteNonQueryNoLockAsync(string sql, CancellationToken cancellationToken = default)
+  {
+    using var command = _connection!.CreateCommand();
+    command.CommandText = sql;
+    await command.ExecuteNonQueryAsync(cancellationToken);
   }
 
   /// <summary>
@@ -470,87 +475,94 @@ public sealed class DuckDbQueryService : IDisposable
       }
     }
 
-    if (needsRecreate) {
-      await RecreateHotTableAsync(stream, tableName, schema, cancellationToken);
-    } else {
-      await ExecuteNonQueryAsync($"DELETE FROM {tableName}", cancellationToken);
-    }
-
-    if (entries.Count == 0) {
-      // Still rebuild the view so the stream is queryable (returns 0 rows)
-      await RebuildStreamViewAsync(stream, cancellationToken);
-      return;
-    }
-
-    // Separate dynamic columns (promoted attributes) from the overflow _meta column.
-    var dynamicCols = schema.Where(c => !IsFixedBaseColumn(c.Name) && !c.IsOverflow).ToList();
-    var dynamicColNames = dynamicCols.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    var hasOverflow = schema.Any(c => c.IsOverflow);
-
-    // Build the INSERT column list.
-    var colParts = new List<string> { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms" };
-    foreach (var dc in dynamicCols) colParts.Add($"\"{dc.Name}\"");
-    if (hasOverflow) colParts.Add("_meta");
-    var colList = string.Join(", ", colParts);
-
-    // Insert in batches to avoid SQL statement size limits.
-    const int batchSize = 500;
-    for (int i = 0; i < entries.Count; i += batchSize) {
-      var batch = entries.Skip(i).Take(batchSize).ToList();
-      var sb = new StringBuilder();
-      sb.Append($"INSERT INTO {tableName} ({colList}) VALUES ");
-
-      for (int j = 0; j < batch.Count; j++) {
-        if (j > 0) sb.Append(", ");
-        var e = batch[j].LogEntry;
-
-        // Attributes not promoted to a top-level column go into overflow.
-        Dictionary<string, object?>? overflowAttrs = null;
-        if (hasOverflow) {
-          overflowAttrs = e.Attributes
-              .Where(a => !dynamicColNames.Contains(a.Key))
-              .ToDictionary(a => a.Key, a => a.Value);
-        }
-
-        sb.Append('(');
-        sb.Append($"'{EscapeSqlString(e.Stream)}'");
-        sb.Append(", ");
-        sb.Append($"'{e.Timestamp:yyyy-MM-dd HH:mm:ss.fffffff}'::TIMESTAMP");
-        sb.Append(", ");
-        sb.Append($"'{EscapeSqlString(e.Level)}'");
-        sb.Append(", ");
-        sb.Append($"'{EscapeSqlString(e.Message)}'");
-        sb.Append(", ");
-        sb.Append(e.TraceId != null ? $"'{EscapeSqlString(e.TraceId)}'" : "NULL");
-        sb.Append(", ");
-        sb.Append(e.SpanId != null ? $"'{EscapeSqlString(e.SpanId)}'" : "NULL");
-        sb.Append(", ");
-        sb.Append(e.DurationMs.HasValue ? e.DurationMs.Value.ToString() : "NULL");
-
-        // Dynamic attribute columns.
-        foreach (var dc in dynamicCols) {
-          sb.Append(", ");
-          sb.Append(e.Attributes.TryGetValue(dc.Name, out var val)
-              ? FormatSqlValue(val, dc.Type)
-              : "NULL");
-        }
-
-        // Overflow _meta.
-        if (hasOverflow) {
-          sb.Append(", ");
-          sb.Append(overflowAttrs is { Count: > 0 }
-              ? $"'{EscapeSqlString(JsonSerializer.Serialize(overflowAttrs))}'"
-              : "NULL");
-        }
-
-        sb.Append(')');
+    // Apply full refresh under one DB critical section so queries never observe
+    // a transient empty/partial hot table between DELETE and INSERT batches.
+    await _dbLock.WaitAsync(cancellationToken);
+    try {
+      if (needsRecreate) {
+        await RecreateHotTableNoLockAsync(stream, tableName, schema, cancellationToken);
+      } else {
+        await ExecuteNonQueryNoLockAsync($"DELETE FROM {tableName}", cancellationToken);
       }
 
-      await ExecuteNonQueryAsync(sb.ToString(), cancellationToken);
-    }
+      if (entries.Count == 0) {
+        // Still rebuild the view so the stream is queryable (returns 0 rows)
+        await RebuildStreamViewNoLockAsync(stream, cancellationToken);
+        return;
+      }
 
-    // Rebuild the view to reflect the updated hot table.
-    await RebuildStreamViewAsync(stream, cancellationToken);
+      // Separate dynamic columns (promoted attributes) from the overflow _meta column.
+      var dynamicCols = schema.Where(c => !IsFixedBaseColumn(c.Name) && !c.IsOverflow).ToList();
+      var dynamicColNames = dynamicCols.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+      var hasOverflow = schema.Any(c => c.IsOverflow);
+
+      // Build the INSERT column list.
+      var colParts = new List<string> { "stream", "_t", "level", "message", "trace_id", "span_id", "duration_ms" };
+      foreach (var dc in dynamicCols) colParts.Add($"\"{dc.Name}\"");
+      if (hasOverflow) colParts.Add("_meta");
+      var colList = string.Join(", ", colParts);
+
+      // Insert in batches to avoid SQL statement size limits.
+      const int batchSize = 500;
+      for (int i = 0; i < entries.Count; i += batchSize) {
+        var batch = entries.Skip(i).Take(batchSize).ToList();
+        var sb = new StringBuilder();
+        sb.Append($"INSERT INTO {tableName} ({colList}) VALUES ");
+
+        for (int j = 0; j < batch.Count; j++) {
+          if (j > 0) sb.Append(", ");
+          var e = batch[j].LogEntry;
+
+          // Attributes not promoted to a top-level column go into overflow.
+          Dictionary<string, object?>? overflowAttrs = null;
+          if (hasOverflow) {
+            overflowAttrs = e.Attributes
+                .Where(a => !dynamicColNames.Contains(a.Key))
+                .ToDictionary(a => a.Key, a => a.Value);
+          }
+
+          sb.Append('(');
+          sb.Append($"'{EscapeSqlString(e.Stream)}'");
+          sb.Append(", ");
+          sb.Append($"'{e.Timestamp:yyyy-MM-dd HH:mm:ss.fffffff}'::TIMESTAMP");
+          sb.Append(", ");
+          sb.Append($"'{EscapeSqlString(e.Level)}'");
+          sb.Append(", ");
+          sb.Append($"'{EscapeSqlString(e.Message)}'");
+          sb.Append(", ");
+          sb.Append(e.TraceId != null ? $"'{EscapeSqlString(e.TraceId)}'" : "NULL");
+          sb.Append(", ");
+          sb.Append(e.SpanId != null ? $"'{EscapeSqlString(e.SpanId)}'" : "NULL");
+          sb.Append(", ");
+          sb.Append(e.DurationMs.HasValue ? e.DurationMs.Value.ToString() : "NULL");
+
+          // Dynamic attribute columns.
+          foreach (var dc in dynamicCols) {
+            sb.Append(", ");
+            sb.Append(e.Attributes.TryGetValue(dc.Name, out var val)
+                ? FormatSqlValue(val, dc.Type)
+                : "NULL");
+          }
+
+          // Overflow _meta.
+          if (hasOverflow) {
+            sb.Append(", ");
+            sb.Append(overflowAttrs is { Count: > 0 }
+                ? $"'{EscapeSqlString(JsonSerializer.Serialize(overflowAttrs))}'"
+                : "NULL");
+          }
+
+          sb.Append(')');
+        }
+
+        await ExecuteNonQueryNoLockAsync(sb.ToString(), cancellationToken);
+      }
+
+      // Rebuild the view to reflect the updated hot table.
+      await RebuildStreamViewNoLockAsync(stream, cancellationToken);
+    } finally {
+      _dbLock.Release();
+    }
 
     _logger.LogDebug("Refreshed hot buffer for stream '{Stream}' with {Count} entries", stream, entries.Count);
   }
@@ -565,14 +577,24 @@ public sealed class DuckDbQueryService : IDisposable
   /// </summary>
   private async Task RecreateHotTableAsync(string stream, string tableName, IReadOnlyList<ColumnSchema> schema, CancellationToken cancellationToken)
   {
-    await ExecuteNonQueryAsync($"DROP TABLE IF EXISTS {tableName}", cancellationToken);
+    await _dbLock.WaitAsync(cancellationToken);
+    try {
+      await RecreateHotTableNoLockAsync(stream, tableName, schema, cancellationToken);
+    } finally {
+      _dbLock.Release();
+    }
+  }
+
+  private async Task RecreateHotTableNoLockAsync(string stream, string tableName, IReadOnlyList<ColumnSchema> schema, CancellationToken cancellationToken)
+  {
+    await ExecuteNonQueryNoLockAsync($"DROP TABLE IF EXISTS {tableName}", cancellationToken);
 
     var colDefs = schema.Select(c => {
       var sqlType = SchemaTypeToSql(c.Type);
       var nullable = c.IsNullable ? "" : " NOT NULL";
       return $"\"{c.Name}\" {sqlType}{nullable}";
     });
-    await ExecuteNonQueryAsync($"CREATE TABLE {tableName} ({string.Join(", ", colDefs)})", cancellationToken);
+    await ExecuteNonQueryNoLockAsync($"CREATE TABLE {tableName} ({string.Join(", ", colDefs)})", cancellationToken);
 
     lock (_registrationLock) {
       _hotTableStreams.TryAdd(stream, 0);
@@ -674,6 +696,16 @@ public sealed class DuckDbQueryService : IDisposable
   /// </summary>
   public async Task RebuildStreamViewAsync(string stream, CancellationToken cancellationToken = default)
   {
+    await _dbLock.WaitAsync(cancellationToken);
+    try {
+      await RebuildStreamViewNoLockAsync(stream, cancellationToken);
+    } finally {
+      _dbLock.Release();
+    }
+  }
+
+  private async Task RebuildStreamViewNoLockAsync(string stream, CancellationToken cancellationToken = default)
+  {
     var mapping = _parquetManager.GetStreamMapping(stream);
     var hotTableName = GetHotTableName(stream);
 
@@ -696,7 +728,7 @@ public sealed class DuckDbQueryService : IDisposable
           : $"CREATE OR REPLACE VIEW {viewName} AS SELECT * FROM (SELECT NULL LIMIT 0)";
     }
 
-    await ExecuteNonQueryAsync(viewSql, cancellationToken);
+    await ExecuteNonQueryNoLockAsync(viewSql, cancellationToken);
 
     lock (_registrationLock) {
       _registeredStreams.Add(stream);

@@ -114,6 +114,33 @@ public sealed class QueryAfterCompactionTests : IDisposable
     return path;
   }
 
+  private async Task<string> WriteL1ParquetAsync(string stream, IReadOnlyList<LogEntry> entries)
+  {
+    var streamDir = Path.Combine(_l1Dir, stream);
+    Directory.CreateDirectory(streamDir);
+
+    var start = entries.Min(e => e.Timestamp);
+    var end = entries.Max(e => e.Timestamp);
+    var fileName = $"{stream}_{start:yyyyMMdd_HHmmss}_{end:yyyyMMdd_HHmmss}.parquet";
+    var path = Path.Combine(streamDir, fileName);
+
+    await ParquetWriter.WriteBatchAsync(entries, path, 100);
+
+    await _catalogManager.AddFileAsync(new CatalogEntry {
+      StreamName = stream,
+      MinTime = start,
+      MaxTime = end,
+      FilePath = path,
+      Level = StorageLevel.L1,
+      RowCount = entries.Count,
+      FileSizeBytes = new FileInfo(path).Length,
+      AddedAt = DateTime.UtcNow,
+      CompactionTier = 1
+    });
+
+    return path;
+  }
+
   private ParquetManager CreateParquetManager()
   {
     return new ParquetManager(
@@ -332,5 +359,68 @@ public sealed class QueryAfterCompactionTests : IDisposable
         $"SELECT COUNT(*) AS cnt FROM \"{stream}\"");
     ((long)after.Rows[0]["cnt"]).Should().Be(expectedTotal,
         "RefreshStreamsAsync after compaction must not discard hot-buffer rows");
+  }
+
+  [Fact]
+  public async Task CompactionStyleHandoff_ReconcilesHotTableWithoutDoubleCounting()
+  {
+    var stream = "handoff-no-overlap";
+    var baseTime = DateTime.UtcNow.Date.AddDays(-1).AddHours(9);
+
+    // Base parquet set (already compacted historical data)
+    await WriteL1ParquetAsync(stream, baseTime, 10);
+
+    var parquetManager = CreateParquetManager();
+    using var queryService = CreateQueryService(parquetManager);
+    await queryService.InitializeAsync();
+
+    // Hot table currently contains 6 rows; 4 are about to be compacted to parquet,
+    // 2 should remain hot after eviction.
+    var hotBuffer = new Lumina.Storage.Wal.WalHotBuffer();
+    var compactedFromHot = Enumerable.Range(0, 4).Select(i => new LogEntry {
+      Stream = stream,
+      Timestamp = DateTime.UtcNow.AddSeconds(-60 - i),
+      Level = "info",
+      Message = $"to-compact-{i}",
+      Attributes = new Dictionary<string, object?> { ["version"] = $"1.0.{i}" }
+    }).ToList();
+    var remainingHot = Enumerable.Range(0, 2).Select(i => new LogEntry {
+      Stream = stream,
+      Timestamp = DateTime.UtcNow.AddSeconds(-10 - i),
+      Level = "debug",
+      Message = $"still-hot-{i}",
+      Attributes = new Dictionary<string, object?> { ["version"] = $"2.0.{i}" }
+    }).ToList();
+
+    var allHot = compactedFromHot.Concat(remainingHot).ToList();
+    for (int i = 0; i < allHot.Count; i++)
+      hotBuffer.Append(stream, "/wal/001.wal", i * 100, allHot[i]);
+
+    await queryService.RefreshHotBufferAsync(stream, hotBuffer.TakeSnapshot(stream));
+
+    var before = await queryService.ExecuteQueryAsync($"SELECT COUNT(*) AS cnt FROM \"{stream}\"");
+    ((long)before.Rows[0]["cnt"]).Should().Be(16);
+
+    // Simulate compaction output that now contains the 4 compacted hot rows.
+    await WriteL1ParquetAsync(stream, compactedFromHot);
+
+    // Simulate CompactorService handoff under writer lock semantics:
+    // refresh views first, then reconcile hot table from post-eviction snapshot.
+    await queryService.RefreshStreamsAsync();
+
+    var spike = await queryService.ExecuteQueryAsync($"SELECT COUNT(*) AS cnt FROM \"{stream}\"");
+    ((long)spike.Rows[0]["cnt"]).Should().Be(20,
+        "without hot-table reconciliation, compacted rows are temporarily double-counted");
+
+    await queryService.RefreshHotBufferAsync(stream,
+        remainingHot.Select((e, i) => new Lumina.Storage.Wal.BufferedEntry {
+          WalFile = "/wal/001.wal",
+          Offset = (i + compactedFromHot.Count) * 100,
+          LogEntry = e
+        }).ToList());
+
+    var after = await queryService.ExecuteQueryAsync($"SELECT COUNT(*) AS cnt FROM \"{stream}\"");
+    ((long)after.Rows[0]["cnt"]).Should().Be(16,
+        "compaction-style reconciliation must remove overlap between new parquet rows and stale hot rows");
   }
 }

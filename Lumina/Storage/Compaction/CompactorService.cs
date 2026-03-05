@@ -1,6 +1,7 @@
 using Lumina.Core.Concurrency;
 using Lumina.Core.Configuration;
 using Lumina.Query;
+using Lumina.Storage.Wal;
 
 namespace Lumina.Storage.Compaction;
 
@@ -15,6 +16,7 @@ public sealed class CompactorService : BackgroundService
   private readonly L1Compactor _l1Compactor;
   private readonly CompactionPipeline _compactionPipeline;
   private readonly DuckDbQueryService _queryService;
+  private readonly WalHotBuffer _hotBuffer;
   private readonly StreamLockManager _streamLockManager;
   private readonly CompactionSettings _settings;
   private readonly ILogger<CompactorService> _logger;
@@ -25,6 +27,7 @@ public sealed class CompactorService : BackgroundService
       L1Compactor l1Compactor,
       CompactionPipeline compactionPipeline,
       DuckDbQueryService queryService,
+        WalHotBuffer hotBuffer,
       StreamLockManager streamLockManager,
       CompactionSettings settings,
       ILogger<CompactorService> logger,
@@ -33,6 +36,7 @@ public sealed class CompactorService : BackgroundService
     _l1Compactor = l1Compactor;
     _compactionPipeline = compactionPipeline;
     _queryService = queryService;
+    _hotBuffer = hotBuffer;
     _streamLockManager = streamLockManager;
     _settings = settings;
     _logger = logger;
@@ -73,6 +77,12 @@ public sealed class CompactorService : BackgroundService
     _logger.LogDebug("Starting compaction run");
     var filesChanged = false;
 
+    // Hold writer lock for the full compaction cycle so queries cannot observe
+    // transient overlap states while L1 compaction writes parquet and hot data
+    // is being evicted/reconciled.
+    await using var writerGuard = await _streamLockManager.CompactionLock
+        .WriterLockAsync(cancellationToken).ConfigureAwait(false);
+
     // Run L1 compaction (WAL → Parquet)
     var entriesCompacted = await _l1Compactor.CompactAllAsync(cancellationToken);
 
@@ -105,15 +115,11 @@ public sealed class CompactorService : BackgroundService
           l2Interval - timeSinceLastL2);
     }
 
-    // Refresh DuckDB views and delete old source files under a writer lock.
-    // The writer lock blocks new queries from starting until the views are
-    // updated and the old files are safely deleted.
+    // Refresh DuckDB views and delete old source files while writer lock is held.
     if (filesChanged) {
-      await using var writerGuard = await _streamLockManager.CompactionLock
-          .WriterLockAsync(cancellationToken).ConfigureAwait(false);
-
       try {
         await _queryService.RefreshStreamsAsync(cancellationToken);
+        await ReconcileHotTablesAfterCompactionAsync(cancellationToken);
         _logger.LogDebug("DuckDB views refreshed after compaction");
       } catch (Exception ex) {
         _logger.LogWarning(ex, "Failed to refresh DuckDB views after compaction");
@@ -126,6 +132,32 @@ public sealed class CompactorService : BackgroundService
           _logger.LogDebug("Deleted {Count} old source files for stream {Stream}", files.Count, stream);
         }
       }
+    }
+  }
+
+  private async Task ReconcileHotTablesAfterCompactionAsync(CancellationToken cancellationToken)
+  {
+    var hotStreams = _hotBuffer.GetBufferedStreams().ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var registeredStreams = _queryService.GetRegisteredStreams();
+
+    // First, bring all hot-backed streams to an exact post-eviction snapshot so
+    // compaction does not temporarily double-count rows (new parquet + stale hot table).
+    foreach (var stream in hotStreams) {
+      cancellationToken.ThrowIfCancellationRequested();
+
+      var snapshot = _hotBuffer.TakeSnapshot(stream);
+      await _queryService.RefreshHotBufferAsync(stream, snapshot, cancellationToken);
+    }
+
+    foreach (var stream in registeredStreams) {
+      cancellationToken.ThrowIfCancellationRequested();
+
+      if (hotStreams.Contains(stream)) {
+        continue;
+      }
+
+      await _queryService.ClearHotTableAsync(stream, cancellationToken);
+      await _queryService.RebuildStreamViewAsync(stream, cancellationToken);
     }
   }
 }

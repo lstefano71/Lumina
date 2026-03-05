@@ -36,6 +36,10 @@ public sealed class ColumnSchema
 /// </summary>
 public static class SchemaResolver
 {
+  private static readonly HashSet<string> PinnedAttributeKeys = new(StringComparer.OrdinalIgnoreCase) {
+    // "version"
+  };
+
   /// <summary>
   /// Resolves a unified schema from a collection of log entries.
   /// </summary>
@@ -85,7 +89,8 @@ public static class SchemaResolver
 
     // Determine overflow keys
     var overflowKeys = keyCounts
-        .Where(k => k.Value < entries.Count * 0.1 || keyCounts.Count > maxDynamicKeys)
+      .Where(k => !IsPinnedAttributeKey(k.Key))
+      .Where(k => k.Value < entries.Count * 0.1 || keyCounts.Count > maxDynamicKeys)
         .Select(k => k.Key)
         .ToHashSet();
 
@@ -149,9 +154,10 @@ public static class SchemaResolver
     }
 
     return keyCounts
-        .Where(k => !schemaKeys.Contains(k.Key) ||
-                    k.Value < entries.Count * 0.1 ||
-                    keyCounts.Count > maxDynamicKeys)
+      .Where(k => !IsPinnedAttributeKey(k.Key))
+      .Where(k => !schemaKeys.Contains(k.Key) ||
+            k.Value < entries.Count * 0.1 ||
+            keyCounts.Count > maxDynamicKeys)
         .Select(k => k.Key)
         .ToHashSet();
   }
@@ -218,4 +224,6 @@ public static class SchemaResolver
   {
     return name is "stream" or "_t" or "level" or "message" or "trace_id" or "span_id" or "duration_ms";
   }
+
+  private static bool IsPinnedAttributeKey(string name) => PinnedAttributeKeys.Contains(name);
 }

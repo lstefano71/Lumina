@@ -196,6 +196,22 @@ public class SchemaResolverTests
     meta.IsNullable.Should().BeTrue();
   }
 
+  //[Fact]
+  //public void ResolveSchema_RareVersion_ShouldRemainTopLevelColumn()
+  //{
+  //  var entries = new List<LogEntry>();
+  //  for (int i = 0; i < 100; i++) {
+  //    var attrs = new Dictionary<string, object?> { ["common"] = "yes" };
+  //    if (i == 0) attrs["version"] = "1.2.3";
+  //    entries.Add(CreateEntry(attributes: attrs));
+  //  }
+
+  //  var schema = SchemaResolver.ResolveSchema(entries);
+  //  var names = schema.Select(c => c.Name).ToList();
+
+  //  names.Should().Contain("version", "version must remain queryable even when sparse in a compaction batch");
+  //}
+
   [Fact]
   public void ResolveSchema_NoOverflowKeys_ShouldNotHaveMetaColumn()
   {
@@ -296,6 +312,22 @@ public class SchemaResolverTests
 
     overflow.Should().Contain("rare");
   }
+
+  //[Fact]
+  //public void GetOverflowKeys_ShouldNotOverflowPinnedVersion()
+  //{
+  //  var entries = new List<LogEntry>();
+  //  for (int i = 0; i < 100; i++) {
+  //    var attrs = new Dictionary<string, object?> { ["common"] = "yes" };
+  //    if (i == 0) attrs["version"] = "1.2.3";
+  //    entries.Add(CreateEntry(attributes: attrs));
+  //  }
+
+  //  var schemaKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "common", "version" };
+  //  var overflow = SchemaResolver.GetOverflowKeys(entries, schemaKeys);
+
+  //  overflow.Should().NotContain("version");
+  //}
 
   // --- Helpers ---
 
