@@ -162,12 +162,13 @@ public sealed class QueryAfterCompactionTests : IDisposable
         $"SELECT count(*) AS cnt FROM \"{stream}\"");
     ((long)beforeResult.Rows[0]["cnt"]).Should().Be(10);
 
-    // Act: run daily compaction — deletes L1 files, creates L2 file
+    // Act: run daily compaction — catalog updated, source files deferred for deletion
     var pipeline = CreatePipeline(new DailyCompactionTier());
     var compacted = await pipeline.CompactAllAsync();
-    compacted.Should().BeGreaterThan(0);
+    compacted.TotalCompacted.Should().BeGreaterThan(0);
 
-    // Refresh views (this is what CompactorService now does after compaction)
+    // Delete pending files and refresh views (simulating CompactorService)
+    foreach (var files in compacted.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
     await queryService.RefreshStreamsAsync();
 
     // Assert: query works and returns the same data from the L2 file
@@ -199,8 +200,9 @@ public sealed class QueryAfterCompactionTests : IDisposable
     // Act: full pipeline (daily → monthly) — all original L1 files are gone
     var pipeline = CreatePipeline(new DailyCompactionTier(), new MonthlyCompactionTier());
     var compacted = await pipeline.CompactAllAsync();
-    compacted.Should().BeGreaterThan(0);
+    compacted.TotalCompacted.Should().BeGreaterThan(0);
 
+    foreach (var files in compacted.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
     await queryService.RefreshStreamsAsync();
 
     // Assert: query returns same data from the monthly L2 file
@@ -229,9 +231,13 @@ public sealed class QueryAfterCompactionTests : IDisposable
     using var queryService = CreateQueryService(parquetManager);
     await queryService.InitializeAsync();
 
-    // Compaction deletes the L1 file
+    // Compaction updates catalog; files are deferred for deletion
     var pipeline = CreatePipeline(new DailyCompactionTier());
-    await pipeline.CompactAllAsync();
+    var compactionResult = await pipeline.CompactAllAsync();
+
+    // Manually delete pending files but do NOT refresh views — simulates the
+    // original bug where stale views reference deleted source files
+    foreach (var files in compactionResult.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
 
     // Do NOT refresh views — the view still references the deleted L1 file
 

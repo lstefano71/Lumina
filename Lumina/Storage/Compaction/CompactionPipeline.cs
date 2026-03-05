@@ -1,9 +1,29 @@
+using Lumina.Core.Concurrency;
 using Lumina.Core.Configuration;
 using Lumina.Core.Models;
 using Lumina.Storage.Catalog;
 using Lumina.Storage.Parquet;
 
 namespace Lumina.Storage.Compaction;
+
+/// <summary>
+/// Result returned by <see cref="CompactionPipeline.CompactAllAsync"/>.
+/// Contains the total number of source files consumed and a list of
+/// source files whose deletion was deferred so the caller can delete
+/// them under a writer lock.
+/// </summary>
+public sealed class CompactionResult
+{
+  /// <summary>Total number of source files consumed across all tiers.</summary>
+  public int TotalCompacted { get; init; }
+
+  /// <summary>
+  /// Source files that were replaced in the catalog but not yet deleted
+  /// from disk.  Grouped by stream name.
+  /// </summary>
+  public IReadOnlyDictionary<string, List<string>> PendingDeletions { get; init; }
+      = new Dictionary<string, List<string>>();
+}
 
 /// <summary>
 /// N-tier calendar-based compaction engine driven by <see cref="ICompactionTier"/> plugins.
@@ -24,17 +44,20 @@ public sealed class CompactionPipeline
   private readonly CatalogManager? _catalogManager;
   private readonly IReadOnlyList<ICompactionTier> _tiers;
   private readonly ILogger<CompactionPipeline> _logger;
+  private readonly StreamLockManager? _streamLockManager;
 
   public CompactionPipeline(
       CompactionSettings settings,
       CatalogManager? catalogManager,
       IEnumerable<ICompactionTier> tiers,
-      ILogger<CompactionPipeline> logger)
+      ILogger<CompactionPipeline> logger,
+      StreamLockManager? streamLockManager = null)
   {
     _settings = settings;
     _catalogManager = catalogManager;
     _tiers = tiers.OrderBy(t => t.Order).ToList();
     _logger = logger;
+    _streamLockManager = streamLockManager;
   }
 
   // ---------------------------------------------------------------------------
@@ -44,13 +67,17 @@ public sealed class CompactionPipeline
   /// <summary>
   /// Runs every registered compaction tier for every stream,
   /// in <see cref="ICompactionTier.Order"/> order.
+  /// Source file deletions are <b>deferred</b> and returned in
+  /// <see cref="CompactionResult.PendingDeletions"/> so the caller can
+  /// delete them under a writer lock.
   /// </summary>
-  /// <returns>Total number of source files consumed across all tiers.</returns>
-  public async Task<int> CompactAllAsync(CancellationToken cancellationToken = default)
+  public async Task<CompactionResult> CompactAllAsync(CancellationToken cancellationToken = default)
   {
+    var pendingDeletions = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
     if (_catalogManager == null) {
       _logger.LogWarning("Compaction pipeline requires CatalogManager");
-      return 0;
+      return new CompactionResult { TotalCompacted = 0, PendingDeletions = pendingDeletions };
     }
 
     var streams = _catalogManager.GetStreams();
@@ -62,15 +89,23 @@ public sealed class CompactionPipeline
       try {
         foreach (var tier in _tiers) {
           if (cancellationToken.IsCancellationRequested) break;
-          var count = await CompactStreamTierAsync(stream, tier, cancellationToken);
+          var (count, filesToDelete) = await CompactStreamTierAsync(stream, tier, cancellationToken);
           totalCompacted += count;
+
+          if (filesToDelete.Count > 0) {
+            if (!pendingDeletions.TryGetValue(stream, out var list)) {
+              list = new List<string>();
+              pendingDeletions[stream] = list;
+            }
+            list.AddRange(filesToDelete);
+          }
         }
       } catch (Exception ex) {
         _logger.LogError(ex, "Failed to compact stream {Stream}", stream);
       }
     }
 
-    return totalCompacted;
+    return new CompactionResult { TotalCompacted = totalCompacted, PendingDeletions = pendingDeletions };
   }
 
   // ---------------------------------------------------------------------------
@@ -80,21 +115,22 @@ public sealed class CompactionPipeline
   /// <summary>
   /// Runs a single <see cref="ICompactionTier"/> against one stream.
   /// </summary>
-  /// <returns>Number of source files consumed.</returns>
-  internal async Task<int> CompactStreamTierAsync(
+  /// <returns>Number of source files consumed and list of files pending deletion.</returns>
+  internal async Task<(int Count, List<string> PendingDeletions)> CompactStreamTierAsync(
       string stream,
       ICompactionTier tier,
       CancellationToken cancellationToken = default)
   {
-    if (_catalogManager == null) return 0;
+    if (_catalogManager == null) return (0, []);
 
     var eligible = _catalogManager.GetEligibleEntries(
         stream, tier.InputLevel, tier.InputCompactionTier);
 
-    if (eligible.Count == 0) return 0;
+    if (eligible.Count == 0) return (0, []);
 
     var groups = tier.GroupEntries(eligible).ToList();
     var consolidatedCount = 0;
+    var allPendingDeletions = new List<string>();
 
     foreach (var group in groups) {
       if (cancellationToken.IsCancellationRequested) break;
@@ -105,8 +141,9 @@ public sealed class CompactionPipeline
       if (groupEntries.Count < tier.MinGroupSize) continue;
 
       try {
-        await ConsolidateGroupAsync(stream, tier, group.Key, groupEntries, cancellationToken);
+        var filesToDelete = await ConsolidateGroupAsync(stream, tier, group.Key, groupEntries, cancellationToken);
         consolidatedCount += groupEntries.Count;
+        allPendingDeletions.AddRange(filesToDelete);
       } catch (Exception ex) {
         _logger.LogError(ex,
             "{Tier} compaction failed for {Stream}/{GroupKey}",
@@ -114,7 +151,7 @@ public sealed class CompactionPipeline
       }
     }
 
-    return consolidatedCount;
+    return (consolidatedCount, allPendingDeletions);
   }
 
   // ---------------------------------------------------------------------------
@@ -123,9 +160,12 @@ public sealed class CompactionPipeline
 
   /// <summary>
   /// Merges the given catalog entries into a single Parquet file.
-  /// Atomic commit order: write temp file → rename → update catalog → delete originals.
+  /// Atomic commit order: write temp file → rename → update catalog.
+  /// Source file deletion is <b>deferred</b> — the returned list must be
+  /// deleted by the caller under a writer lock.
   /// </summary>
-  private async Task ConsolidateGroupAsync(
+  /// <returns>List of source file paths that should be deleted by the caller.</returns>
+  private async Task<IReadOnlyList<string>> ConsolidateGroupAsync(
       string stream,
       ICompactionTier tier,
       string groupKey,
@@ -144,7 +184,7 @@ public sealed class CompactionPipeline
     if (logEntries.Count == 0) {
       _logger.LogDebug("{Tier}: no entries to consolidate for {Stream}/{GroupKey}",
           tier.Name, stream, groupKey);
-      return;
+      return Array.Empty<string>();
     }
 
     var minTime = logEntries.Min(e => e.Timestamp);
@@ -179,7 +219,8 @@ public sealed class CompactionPipeline
         "{Tier} compaction: {Count} entries from {Files} files → {Output}",
         tier.Name, logEntries.Count, sourceFiles.Count, outputFileName);
 
-    DeleteSourceFiles(sourceFiles);
+    // Deletion is deferred — return the list for the caller to handle.
+    return sourceFiles;
   }
 
   // ---------------------------------------------------------------------------
@@ -188,8 +229,9 @@ public sealed class CompactionPipeline
 
   /// <summary>
   /// Best-effort deletion of source files after a successful catalog commit.
+  /// Public so that <see cref="CompactorService"/> can invoke it under a writer lock.
   /// </summary>
-  private void DeleteSourceFiles(IReadOnlyList<string> files)
+  public void DeleteSourceFiles(IReadOnlyList<string> files)
   {
     foreach (var file in files) {
       try {

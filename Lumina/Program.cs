@@ -109,6 +109,8 @@ builder.Services.AddSingleton<CatalogManager>();
 builder.Services.AddSingleton<CatalogRebuilder>();
 builder.Services.AddSingleton<CatalogGarbageCollector>();
 
+builder.Services.AddSingleton<Lumina.Core.Concurrency.StreamLockManager>();
+
 builder.Services.AddSingleton<L1Compactor>(sp => {
   var walManager = sp.GetRequiredService<WalManager>();
   var cursorManager = sp.GetRequiredService<CursorManager>();
@@ -126,7 +128,8 @@ builder.Services.AddSingleton<CompactionPipeline>(sp => {
   var catalogManager = sp.GetRequiredService<CatalogManager>();
   var tiers = sp.GetRequiredService<IEnumerable<ICompactionTier>>();
   var logger = sp.GetRequiredService<ILogger<CompactionPipeline>>();
-  return new CompactionPipeline(settings, catalogManager, tiers, logger);
+  var streamLockManager = sp.GetRequiredService<Lumina.Core.Concurrency.StreamLockManager>();
+  return new CompactionPipeline(settings, catalogManager, tiers, logger, streamLockManager);
 });
 
 builder.Services.AddSingleton<ParquetManager>(sp => {
@@ -140,7 +143,8 @@ builder.Services.AddSingleton<DuckDbQueryService>(sp => {
   var settings = sp.GetRequiredService<QuerySettings>();
   var parquetManager = sp.GetRequiredService<ParquetManager>();
   var logger = sp.GetRequiredService<ILogger<DuckDbQueryService>>();
-  return new DuckDbQueryService(settings, parquetManager, logger);
+  var streamLockManager = sp.GetRequiredService<Lumina.Core.Concurrency.StreamLockManager>();
+  return new DuckDbQueryService(settings, parquetManager, logger, streamLockManager);
 });
 
 // Register observability

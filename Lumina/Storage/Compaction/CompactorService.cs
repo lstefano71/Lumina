@@ -1,3 +1,4 @@
+using Lumina.Core.Concurrency;
 using Lumina.Core.Configuration;
 using Lumina.Query;
 
@@ -14,6 +15,7 @@ public sealed class CompactorService : BackgroundService
   private readonly L1Compactor _l1Compactor;
   private readonly CompactionPipeline _compactionPipeline;
   private readonly DuckDbQueryService _queryService;
+  private readonly StreamLockManager _streamLockManager;
   private readonly CompactionSettings _settings;
   private readonly ILogger<CompactorService> _logger;
   private readonly IHostApplicationLifetime _lifetime;
@@ -23,6 +25,7 @@ public sealed class CompactorService : BackgroundService
       L1Compactor l1Compactor,
       CompactionPipeline compactionPipeline,
       DuckDbQueryService queryService,
+      StreamLockManager streamLockManager,
       CompactionSettings settings,
       ILogger<CompactorService> logger,
       IHostApplicationLifetime lifetime)
@@ -30,6 +33,7 @@ public sealed class CompactorService : BackgroundService
     _l1Compactor = l1Compactor;
     _compactionPipeline = compactionPipeline;
     _queryService = queryService;
+    _streamLockManager = streamLockManager;
     _settings = settings;
     _logger = logger;
     _lifetime = lifetime;
@@ -83,14 +87,15 @@ public sealed class CompactorService : BackgroundService
     var l2Interval = TimeSpan.FromHours(_settings.L2IntervalHours);
     var timeSinceLastL2 = DateTime.UtcNow - _lastL2Run;
 
+    CompactionResult? compactionResult = null;
     if (timeSinceLastL2 >= l2Interval) {
       _logger.LogInformation("Starting compaction pipeline");
-      var filesConsolidated = await _compactionPipeline.CompactAllAsync(cancellationToken);
+      compactionResult = await _compactionPipeline.CompactAllAsync(cancellationToken);
       _lastL2Run = DateTime.UtcNow;
 
-      if (filesConsolidated > 0) {
+      if (compactionResult.TotalCompacted > 0) {
         filesChanged = true;
-        _logger.LogInformation("Compaction pipeline complete: {Count} files consolidated", filesConsolidated);
+        _logger.LogInformation("Compaction pipeline complete: {Count} files consolidated", compactionResult.TotalCompacted);
       } else {
         _logger.LogDebug("Compaction pipeline complete: no files to consolidate");
       }
@@ -100,13 +105,26 @@ public sealed class CompactorService : BackgroundService
           l2Interval - timeSinceLastL2);
     }
 
-    // Refresh DuckDB views so queries see the updated file set immediately
+    // Refresh DuckDB views and delete old source files under a writer lock.
+    // The writer lock blocks new queries from starting until the views are
+    // updated and the old files are safely deleted.
     if (filesChanged) {
+      await using var writerGuard = await _streamLockManager.CompactionLock
+          .WriterLockAsync(cancellationToken).ConfigureAwait(false);
+
       try {
         await _queryService.RefreshStreamsAsync(cancellationToken);
         _logger.LogDebug("DuckDB views refreshed after compaction");
       } catch (Exception ex) {
         _logger.LogWarning(ex, "Failed to refresh DuckDB views after compaction");
+      }
+
+      // Now that views point to the new merged files, safely delete the old ones.
+      if (compactionResult?.PendingDeletions is { Count: > 0 } pending) {
+        foreach (var (stream, files) in pending) {
+          _compactionPipeline.DeleteSourceFiles(files);
+          _logger.LogDebug("Deleted {Count} old source files for stream {Stream}", files.Count, stream);
+        }
       }
     }
   }

@@ -228,9 +228,11 @@ public sealed class CompactionPipelineTests : IDisposable
     await WriteL1ParquetAsync(stream, yesterday.AddHours(2), 5);
 
     var pipeline = CreatePipeline(new DailyCompactionTier());
-    var count = await pipeline.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
 
-    count.Should().Be(3);
+    result.TotalCompacted.Should().Be(3);
+    // Perform deferred deletions (normally done by CompactorService under writer lock)
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
 
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(1);
@@ -253,9 +255,9 @@ public sealed class CompactionPipelineTests : IDisposable
     await WriteL1ParquetAsync(stream, today, 5);
 
     var pipeline = CreatePipeline(new DailyCompactionTier());
-    var count = await pipeline.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
 
-    count.Should().Be(0);
+    result.TotalCompacted.Should().Be(0);
 
     var l1Entries = _catalogManager.GetEntries(stream, StorageLevel.L1);
     l1Entries.Should().HaveCount(1);
@@ -272,9 +274,10 @@ public sealed class CompactionPipelineTests : IDisposable
     await WriteL1ParquetAsync(stream, yesterday, 7);
 
     var pipeline = CreatePipeline(new DailyCompactionTier());
-    var count = await pipeline.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
 
-    count.Should().Be(2);
+    result.TotalCompacted.Should().Be(2);
 
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(2);
@@ -322,9 +325,10 @@ public sealed class CompactionPipelineTests : IDisposable
     }
 
     var pipeline = CreatePipeline(new MonthlyCompactionTier());
-    var count = await pipeline.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
 
-    count.Should().Be(3);
+    result.TotalCompacted.Should().Be(3);
 
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(1);
@@ -372,9 +376,9 @@ public sealed class CompactionPipelineTests : IDisposable
     }
 
     var pipeline = CreatePipeline(new MonthlyCompactionTier());
-    var count = await pipeline.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
 
-    count.Should().Be(0);
+    result.TotalCompacted.Should().Be(0);
 
     var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
     l2Entries.Should().HaveCount(2);
@@ -412,9 +416,9 @@ public sealed class CompactionPipelineTests : IDisposable
     });
 
     var pipeline = CreatePipeline(new MonthlyCompactionTier());
-    var count = await pipeline.CompactAllAsync();
+    var result = await pipeline.CompactAllAsync();
 
-    count.Should().Be(0);
+    result.TotalCompacted.Should().Be(0);
   }
 
   // -----------------------------------------------------------------------
@@ -439,7 +443,8 @@ public sealed class CompactionPipelineTests : IDisposable
     // Single CompactAllAsync chains daily → monthly in one pass:
     //   L1 files → daily L2 (3 files) → monthly L2 (1 file)
     var result = await pipeline.CompactAllAsync();
-    result.Should().BeGreaterThan(0);
+    result.TotalCompacted.Should().BeGreaterThan(0);
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
 
     var allL2 = _catalogManager.GetEntries(stream, StorageLevel.L2);
     allL2.Should().HaveCount(1);
@@ -459,8 +464,8 @@ public sealed class CompactionPipelineTests : IDisposable
         new ICompactionTier[] { new DailyCompactionTier(), new MonthlyCompactionTier() },
         NullLogger<CompactionPipeline>.Instance);
 
-    var count = await pipeline.CompactAllAsync();
-    count.Should().Be(0);
+    var result = await pipeline.CompactAllAsync();
+    result.TotalCompacted.Should().Be(0);
   }
 
   // -----------------------------------------------------------------------
@@ -483,7 +488,8 @@ public sealed class CompactionPipelineTests : IDisposable
     await WriteL1ParquetAsync(stream, jan3, 5);
 
     var result = await pipeline.CompactAllAsync();
-    result.Should().BeGreaterThan(0);
+    result.TotalCompacted.Should().BeGreaterThan(0);
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
 
     // Daily ran first → monthly consumed the daily files → one monthly file
     var allL2 = _catalogManager.GetEntries(stream, StorageLevel.L2);

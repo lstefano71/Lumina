@@ -1,9 +1,11 @@
 using DuckDB.NET.Data;
 
+using Lumina.Core.Concurrency;
 using Lumina.Core.Configuration;
 using Lumina.Storage.Parquet;
 using Lumina.Storage.Wal;
 
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 
@@ -29,22 +31,25 @@ public sealed class DuckDbQueryService : IDisposable
   private readonly QuerySettings _settings;
   private readonly ParquetManager _parquetManager;
   private readonly ILogger<DuckDbQueryService> _logger;
+  private readonly StreamLockManager _streamLockManager;
   private DuckDBConnection? _connection;
   private bool _disposed;
   private readonly HashSet<string> _registeredStreams = new(StringComparer.OrdinalIgnoreCase);
-  private readonly HashSet<string> _hotTableStreams = new(StringComparer.OrdinalIgnoreCase);
-  private readonly Dictionary<string, IReadOnlyList<ColumnSchema>> _hotTableSchemas = new(StringComparer.OrdinalIgnoreCase);
+  private readonly ConcurrentDictionary<string, byte> _hotTableStreams = new(StringComparer.OrdinalIgnoreCase);
+  private readonly ConcurrentDictionary<string, IReadOnlyList<ColumnSchema>> _hotTableSchemas = new(StringComparer.OrdinalIgnoreCase);
   private readonly object _registrationLock = new();
   private DateTime _lastRefreshTime = DateTime.MinValue;
 
   public DuckDbQueryService(
       QuerySettings settings,
       ParquetManager parquetManager,
-      ILogger<DuckDbQueryService> logger)
+      ILogger<DuckDbQueryService> logger,
+      StreamLockManager? streamLockManager = null)
   {
     _settings = settings;
     _parquetManager = parquetManager;
     _logger = logger;
+    _streamLockManager = streamLockManager ?? new StreamLockManager();
   }
 
   /// <summary>
@@ -173,6 +178,8 @@ public sealed class DuckDbQueryService : IDisposable
 
   /// <summary>
   /// Executes a SQL query with optional parameters.
+  /// Holds a <see cref="StreamLockManager.CompactionLock"/> reader lock for the
+  /// duration of the query so that compaction cannot delete Parquet files mid-read.
   /// </summary>
   /// <param name="sql">The SQL query.</param>
   /// <param name="parameters">Optional query parameters.</param>
@@ -188,6 +195,11 @@ public sealed class DuckDbQueryService : IDisposable
     if (_connection == null) {
       await InitializeAsync(cancellationToken);
     }
+
+    // Acquire a reader lock so compaction cannot delete Parquet files while
+    // DuckDB is reading them.
+    await using var guard = await _streamLockManager.CompactionLock
+        .ReaderLockAsync(cancellationToken).ConfigureAwait(false);
 
     var stopwatch = System.Diagnostics.Stopwatch.StartNew();
     var rows = new List<IReadOnlyDictionary<string, object?>>();
@@ -286,6 +298,11 @@ public sealed class DuckDbQueryService : IDisposable
       int limit = 1000,
       CancellationToken cancellationToken = default)
   {
+    // Reader lock covers file-path resolution + query execution so that
+    // compaction cannot delete files between the two steps.
+    await using var guard = await _streamLockManager.CompactionLock
+        .ReaderLockAsync(cancellationToken).ConfigureAwait(false);
+
     var files = _parquetManager.GetStreamFiles(stream);
 
     if (files.Count == 0) {
@@ -338,6 +355,9 @@ public sealed class DuckDbQueryService : IDisposable
       int limit = 1000,
       CancellationToken cancellationToken = default)
   {
+    await using var guard = await _streamLockManager.CompactionLock
+        .ReaderLockAsync(cancellationToken).ConfigureAwait(false);
+
     var files = _parquetManager.GetStreamFiles(stream);
 
     if (files.Count == 0) {
@@ -375,6 +395,9 @@ public sealed class DuckDbQueryService : IDisposable
       DateTime? end = null,
       CancellationToken cancellationToken = default)
   {
+    await using var guard = await _streamLockManager.CompactionLock
+        .ReaderLockAsync(cancellationToken).ConfigureAwait(false);
+
     var files = _parquetManager.GetStreamFiles(stream);
 
     if (files.Count == 0) {
@@ -553,7 +576,7 @@ public sealed class DuckDbQueryService : IDisposable
     await ExecuteNonQueryAsync($"CREATE TABLE {tableName} ({string.Join(", ", colDefs)})", cancellationToken);
 
     lock (_registrationLock) {
-      _hotTableStreams.Add(stream);
+      _hotTableStreams.TryAdd(stream, 0);
       _hotTableSchemas[stream] = schema;
     }
   }
@@ -612,7 +635,7 @@ public sealed class DuckDbQueryService : IDisposable
 
     var tableName = GetHotTableName(stream);
     lock (_registrationLock) {
-      if (!_hotTableStreams.Contains(stream)) return;
+      if (!_hotTableStreams.ContainsKey(stream)) return;
     }
 
     await ExecuteNonQueryAsync($"DELETE FROM {tableName}", cancellationToken);
@@ -625,7 +648,7 @@ public sealed class DuckDbQueryService : IDisposable
   public async Task EnsureHotTableAsync(string stream, CancellationToken cancellationToken = default)
   {
     lock (_registrationLock) {
-      if (_hotTableStreams.Contains(stream)) return;
+      if (_hotTableStreams.ContainsKey(stream)) return;
     }
 
     var tableName = GetHotTableName(stream);
@@ -643,7 +666,7 @@ public sealed class DuckDbQueryService : IDisposable
     await ExecuteNonQueryAsync(createSql, cancellationToken);
 
     lock (_registrationLock) {
-      _hotTableStreams.Add(stream);
+      _hotTableStreams.TryAdd(stream, 0);
     }
   }
 
@@ -657,7 +680,7 @@ public sealed class DuckDbQueryService : IDisposable
 
     bool hasHotTable;
     lock (_registrationLock) {
-      hasHotTable = _hotTableStreams.Contains(stream);
+      hasHotTable = _hotTableStreams.ContainsKey(stream);
     }
 
     string viewSql;
