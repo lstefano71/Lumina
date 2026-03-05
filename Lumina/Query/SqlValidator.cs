@@ -347,8 +347,7 @@ public static class SqlValidator
     if (string.IsNullOrWhiteSpace(sql))
       return sql;
 
-    return TickInPattern.Replace(sql, match =>
-    {
+    return TickInPattern.Replace(sql, match => {
       var col = match.Groups["col"].Value;
       var tick = match.Groups["tick"].Value;
 

@@ -2,6 +2,8 @@ using Lumina.Storage.Catalog;
 
 using Microsoft.Extensions.Logging;
 
+using System.Collections.Concurrent;
+
 using Xunit;
 
 namespace Lumina.Tests.Storage.Catalog;
@@ -536,5 +538,111 @@ public sealed class CatalogManagerTests : IDisposable
     var eligible = manager.GetEligibleForDailyCompaction("test-stream", now.Date);
     Assert.Single(eligible);
     Assert.Equal("eligible.parquet", Path.GetFileName(eligible[0].FilePath));
+  }
+
+  [Fact]
+  public async Task ConcurrentReadsDuringReplaceFiles_ShouldObserveCoherentSnapshots()
+  {
+    var manager = new CatalogManager(_options, _logger);
+    await manager.InitializeAsync();
+
+    const string stream = "race-stream";
+    const int fixedFileCount = 20;
+    var now = DateTime.UtcNow;
+    var currentPaths = new List<string>(capacity: fixedFileCount);
+    var currentPathsLock = new object();
+
+    for (int i = 0; i < fixedFileCount; i++) {
+      var path = Path.Combine(_testDirectory, $"seed_{i:D3}.parquet");
+      currentPaths.Add(path);
+
+      await manager.AddFileAsync(new CatalogEntry {
+        StreamName = stream,
+        MinTime = now.AddMinutes(-i - 1),
+        MaxTime = now.AddMinutes(-i),
+        FilePath = path,
+        Level = StorageLevel.L1,
+        RowCount = 10,
+        FileSizeBytes = 100,
+        AddedAt = DateTime.UtcNow
+      });
+    }
+
+    var failures = new ConcurrentQueue<string>();
+    var writerDone = false;
+
+    var writer = Task.Run(async () => {
+      for (int i = 0; i < 500; i++) {
+        var slot = i % fixedFileCount;
+        string oldPath;
+        lock (currentPathsLock) {
+          oldPath = currentPaths[slot];
+        }
+
+        var newPath = Path.Combine(_testDirectory, $"swap_{i:D4}.parquet");
+        await manager.ReplaceFilesAsync(
+            new[] { oldPath },
+            new CatalogEntry {
+              StreamName = stream,
+              MinTime = now.AddMinutes(i),
+              MaxTime = now.AddMinutes(i + 1),
+              FilePath = newPath,
+              Level = StorageLevel.L1,
+              RowCount = 10,
+              FileSizeBytes = 100,
+              AddedAt = DateTime.UtcNow
+            });
+
+        lock (currentPathsLock) {
+          currentPaths[slot] = newPath;
+        }
+      }
+
+      writerDone = true;
+    });
+
+    var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () => {
+      while (!writerDone) {
+        try {
+          var files = manager.GetFiles(stream);
+          var entries = manager.GetEntries(stream: stream);
+          var streams = manager.GetStreams();
+          var totalSize = manager.GetTotalSize();
+
+          if (files.Count != fixedFileCount) {
+            failures.Enqueue($"Expected {fixedFileCount} files, got {files.Count}");
+          }
+
+          if (entries.Count != fixedFileCount) {
+            failures.Enqueue($"Expected {fixedFileCount} entries, got {entries.Count}");
+          }
+
+          if (!streams.Contains(stream)) {
+            failures.Enqueue("Expected stream to remain visible in GetStreams");
+          }
+
+          if (totalSize <= 0) {
+            failures.Enqueue("Expected total size to remain positive");
+          }
+
+          var distinctFiles = files.Distinct(StringComparer.OrdinalIgnoreCase).Count();
+          if (distinctFiles != files.Count) {
+            failures.Enqueue("Detected duplicate file paths in a read snapshot");
+          }
+        } catch (Exception ex) {
+          failures.Enqueue($"Reader exception: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        await Task.Yield();
+      }
+    })).ToArray();
+
+    await writer;
+    await Task.WhenAll(readers);
+
+    Assert.True(failures.IsEmpty, string.Join(Environment.NewLine, failures.Take(10)));
+
+    var finalFiles = manager.GetFiles(stream);
+    Assert.Equal(fixedFileCount, finalFiles.Count);
   }
 }
