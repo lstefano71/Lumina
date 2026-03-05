@@ -71,28 +71,28 @@ public static class QueryEndpoint
   /// GET /v1/query/sql?q={sql} - Execute SQL query from URL parameter.
   /// </summary>
   private static async Task<IResult> ExecuteSqlGetAsync(
-      [FromQuery(Name = "q")] string q,
-      [FromQuery] bool debug,
-      [FromServices] DuckDbQueryService queryService,
-      [FromServices] QuerySettings settings,
-      CancellationToken cancellationToken)
+    [FromQuery(Name = "q")] string q,
+    [FromQuery] bool? debug,
+    [FromServices] DuckDbQueryService queryService,
+    [FromServices] QuerySettings settings,
+    CancellationToken cancellationToken)
   {
     if (string.IsNullOrWhiteSpace(q)) {
       return Results.BadRequest("SQL query (q) is required");
     }
 
-    return await ExecuteQueryInternalAsync(q, null, debug, queryService, settings, cancellationToken);
+    return await ExecuteQueryInternalAsync(q, null, debug ?? false, queryService, settings, cancellationToken);
   }
 
   /// <summary>
   /// POST /v1/query/sql - Execute SQL query from plain text body.
   /// </summary>
   private static async Task<IResult> ExecuteSqlPostAsync(
-      HttpContext context,
-      [FromQuery] bool debug,
-      [FromServices] DuckDbQueryService queryService,
-      [FromServices] QuerySettings settings,
-      CancellationToken cancellationToken)
+    HttpContext context,
+    [FromQuery] bool? debug,
+    [FromServices] DuckDbQueryService queryService,
+    [FromServices] QuerySettings settings,
+    CancellationToken cancellationToken)
   {
     using var reader = new StreamReader(context.Request.Body);
     var sql = await reader.ReadToEndAsync(cancellationToken);
@@ -101,24 +101,24 @@ public static class QueryEndpoint
       return Results.BadRequest("SQL query body is required");
     }
 
-    return await ExecuteQueryInternalAsync(sql, null, debug, queryService, settings, cancellationToken);
+    return await ExecuteQueryInternalAsync(sql, null, debug ?? false, queryService, settings, cancellationToken);
   }
 
   /// <summary>
   /// POST /v1/query/sql/parameterized - Execute parameterized SQL query.
   /// </summary>
   private static async Task<IResult> ExecuteSqlParameterizedAsync(
-      [FromBody] SqlParameterizedRequest request,
-      [FromQuery] bool debug,
-      [FromServices] DuckDbQueryService queryService,
-      [FromServices] QuerySettings settings,
-      CancellationToken cancellationToken)
+    [FromBody] SqlParameterizedRequest request,
+    [FromQuery] bool? debug,
+    [FromServices] DuckDbQueryService queryService,
+    [FromServices] QuerySettings settings,
+    CancellationToken cancellationToken)
   {
     if (string.IsNullOrWhiteSpace(request.Sql)) {
       return Results.BadRequest("SQL query is required");
     }
 
-    return await ExecuteQueryInternalAsync(request.Sql, request.Parameters, debug, queryService, settings, cancellationToken);
+    return await ExecuteQueryInternalAsync(request.Sql, request.Parameters, debug ?? false, queryService, settings, cancellationToken);
   }
 
   /// <summary>
