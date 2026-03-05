@@ -388,6 +388,26 @@ public class SqlValidatorTests
   }
 
   [Fact]
+  public void RewriteTickIntervals_VariableWithTimeSuffix_RewritesToPointWindow()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '$todayT19:30'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN TIMESTAMP '2025-06-15 19:30:00.000000' AND TIMESTAMP '2025-06-15 19:30:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_TimeListWithDuration_RewritesToMergedWindow()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '2026-03-05T[09:00,10:30];2h'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN", result);
+    Assert.Contains("2026-03-05 09:00:00.000000", result);
+    Assert.Contains("2026-03-05 12:30:00.000000", result);
+  }
+
+  [Fact]
   public void RewriteTickIntervals_IsoLiterals_RewritesToBetween()
   {
     var sql = "SELECT * FROM logs WHERE ts IN '2025-01-10T09:00:00..2025-01-10T17:00:00'";

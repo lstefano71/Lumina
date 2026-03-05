@@ -208,6 +208,15 @@ public class TickExpressionParserTests
   }
 
   [Fact]
+  public void Parse_Today_WithTimeSuffix_ResolvesToSpecificTime()
+  {
+    var r = ParseSingle("$todayT19:30");
+
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 19, 30, 0, TimeSpan.Zero), r.Start);
+    Assert.Equal(r.Start, r.End);
+  }
+
+  [Fact]
   public void Parse_DateOnly_WithIanaTimezone_ResolvesToZoneOffset()
   {
     var r = ParseSingle("2025-01-10@Europe/Rome");
@@ -252,6 +261,16 @@ public class TickExpressionParserTests
     Assert.Equal(2, intervals.Count);
     Assert.Equal(TimeSpan.Zero, intervals[0].Start.Offset);
     Assert.Equal(TimeSpan.FromHours(2), intervals[1].Start.Offset);
+  }
+
+  [Fact]
+  public void Parse_TimeListWithDuration_MergesOverlappingIntervals()
+  {
+    var intervals = ParseMulti("2026-03-05T[09:00,10:30];2h");
+
+    Assert.Single(intervals);
+    Assert.Equal(new DateTimeOffset(2026, 3, 5, 9, 0, 0, TimeSpan.Zero), intervals[0].Start);
+    Assert.Equal(new DateTimeOffset(2026, 3, 5, 12, 30, 0, TimeSpan.Zero), intervals[0].End);
   }
 
   [Fact]
