@@ -132,6 +132,75 @@ public class WalWriterTests : WalTestBase
     needsRotation.Should().BeTrue();
   }
 
+  [Fact]
+  public async Task Entries_ShouldSurviveWriterDispose_WithoutWriteThrough()
+  {
+    // Regression test for data loss on restart when EnableWriteThrough=false.
+    // Writes via RandomAccess bypass the FileStream managed buffer, so
+    // FlushAsync() (which calls Flush(flushToDisk:false)) was a no-op.
+    // After the fix, DisposeAsync() calls Flush(flushToDisk:true) which
+    // invokes FlushFileBuffers, ensuring data reaches physical storage.
+
+    var settings = new WalSettings {
+      DataDirectory = TempDirectory,
+      MaxWalSizeBytes = 10 * 1024 * 1024,
+      EnableWriteThrough = false, // the problematic path
+      FlushIntervalMs = 100
+    };
+    var filePath = GetWalPath("test-stream");
+    const int entryCount = 927; // matches the reproduction count
+
+    // --- Write phase: create writer, write entries, dispose ---
+    {
+      await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+      for (int i = 0; i < entryCount; i++) {
+        await writer.WriteAsync(CreateTestEntry(message: $"msg #{i}"));
+      }
+    } // writer disposed here — SyncToDisk() should be called
+
+    // --- Read phase: open a fresh reader and count entries ---
+    using var reader = await WalReader.CreateAsync(filePath, "test-stream");
+    var count = 0;
+    await foreach (var entry in reader.ReadEntriesAsync()) {
+      count++;
+    }
+
+    count.Should().Be(entryCount,
+        "all entries must survive a writer dispose cycle when WriteThrough is disabled");
+  }
+
+  [Fact]
+  public async Task Entries_ShouldSurviveBatchWriterDispose_WithoutWriteThrough()
+  {
+    var settings = new WalSettings {
+      DataDirectory = TempDirectory,
+      MaxWalSizeBytes = 10 * 1024 * 1024,
+      EnableWriteThrough = false,
+      FlushIntervalMs = 100
+    };
+    var filePath = GetWalPath("test-stream");
+    const int batchSize = 1000;
+
+    // --- Write phase ---
+    {
+      await using var writer = await WalWriter.CreateAsync(filePath, "test-stream", settings);
+      var batch = Enumerable.Range(0, batchSize)
+          .Select(i => CreateTestEntry(message: $"batch msg #{i}"))
+          .ToList();
+      await writer.WriteBatchAsync(batch);
+    }
+
+    // --- Read phase ---
+    using var reader = await WalReader.CreateAsync(filePath, "test-stream");
+    var count = 0;
+    await foreach (var _ in reader.ReadEntriesAsync()) {
+      count++;
+    }
+
+    count.Should().Be(batchSize,
+        "all batch entries must survive a writer dispose cycle when WriteThrough is disabled");
+  }
+
   private static LogEntry CreateTestEntry(string stream = "test-stream", string message = "Test message")
   {
     return new LogEntry {

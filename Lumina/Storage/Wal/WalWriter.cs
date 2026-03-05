@@ -21,6 +21,7 @@ public sealed class WalWriter : IAsyncDisposable
   private long _currentOffset;
   private bool _headerWritten;
   private bool _disposed;
+  private volatile bool _dirty;
 
   /// <summary>
   /// Gets the current file path.
@@ -125,7 +126,7 @@ public sealed class WalWriter : IAsyncDisposable
       try {
         // Write at the reserved offset (safe for concurrent callers).
         await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), offset, cancellationToken);
-        await _fileStream.FlushAsync(cancellationToken);
+        _dirty = true;
       } catch {
         // The offset space has already been reserved. Write a padding frame so
         // readers can cleanly skip this region instead of hitting garbage bytes.
@@ -187,7 +188,7 @@ public sealed class WalWriter : IAsyncDisposable
       try {
         // Write at the reserved offset (safe for concurrent callers).
         await RandomAccess.WriteAsync(_handle, buffer.AsMemory(0, totalSize), baseOffset, cancellationToken);
-        await _fileStream.FlushAsync(cancellationToken);
+        _dirty = true;
       } catch {
         // The offset space has already been reserved. Write a padding frame so
         // readers can cleanly skip this region instead of hitting garbage bytes.
@@ -205,10 +206,11 @@ public sealed class WalWriter : IAsyncDisposable
   /// Forces a flush of the underlying buffer to disk.
   /// </summary>
   /// <param name="cancellationToken">Cancellation token.</param>
-  public async ValueTask FlushAsync(CancellationToken cancellationToken = default)
+  public ValueTask FlushAsync(CancellationToken cancellationToken = default)
   {
     ObjectDisposedException.ThrowIf(_disposed, this);
-    await _fileStream.FlushAsync(cancellationToken);
+    SyncToDisk();
+    return default;
   }
 
   /// <summary>
@@ -229,7 +231,8 @@ public sealed class WalWriter : IAsyncDisposable
     // Header is written once during CreateAsync before the writer is
     // shared, so no contention here.
     await RandomAccess.WriteAsync(_handle, buffer, 0, cancellationToken);
-    await _fileStream.FlushAsync(cancellationToken);
+    _dirty = true;
+    SyncToDisk();
     _currentOffset = WalFileHeader.Size;
     _headerWritten = true;
   }
@@ -265,6 +268,27 @@ public sealed class WalWriter : IAsyncDisposable
     }
   }
 
+  /// <summary>
+  /// Flushes the OS file buffers to physical storage.
+  /// This is the ONLY reliable way to sync data written via <see cref="RandomAccess"/>
+  /// because <see cref="FileStream.FlushAsync(CancellationToken)"/> resolves to
+  /// <c>Flush(flushToDisk: false)</c> which skips <c>FlushFileBuffers</c> when the
+  /// managed write buffer is empty — and RandomAccess bypasses that buffer entirely.
+  /// When <see cref="WalSettings.EnableWriteThrough"/> is true, the OS already
+  /// writes through to disk on every <c>WriteFile</c> call, so this is a no-op.
+  /// </summary>
+  private void SyncToDisk()
+  {
+    if (_settings.EnableWriteThrough || !_dirty) {
+      return;
+    }
+
+    // Flush(flushToDisk: true) → FlushFileBuffers(handle), which syncs ALL
+    // data written through the handle — including RandomAccess writes.
+    _fileStream.Flush(flushToDisk: true);
+    _dirty = false;
+  }
+
   /// <inheritdoc />
   public async ValueTask DisposeAsync()
   {
@@ -275,7 +299,7 @@ public sealed class WalWriter : IAsyncDisposable
     _disposed = true;
 
     try {
-      await _fileStream.FlushAsync();
+      SyncToDisk();
     } catch (ObjectDisposedException) {
       // Already disposed, ignore
     }

@@ -158,6 +158,7 @@ builder.Services.AddOpenTelemetry()
 // Register hosted services
 builder.Services.AddSingleton<WalStartupReplayService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<WalStartupReplayService>());
+builder.Services.AddHostedService<WalFlushService>();
 builder.Services.AddHostedService<CompactorService>();
 builder.Services.AddHostedService<StreamDiscoveryService>();
 builder.Services.AddHostedService<LiveQueryRefreshService>();

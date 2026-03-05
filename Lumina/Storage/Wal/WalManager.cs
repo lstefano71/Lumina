@@ -358,6 +358,25 @@ public sealed class WalManager : IAsyncDisposable
   }
 
   /// <summary>
+  /// Flushes all active WAL writers to physical storage (fsync).
+  /// Called periodically by <see cref="WalFlushService"/> and on graceful shutdown.
+  /// </summary>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  public async Task FlushAllWritersAsync(CancellationToken cancellationToken = default)
+  {
+    ObjectDisposedException.ThrowIf(_disposed, this);
+
+    foreach (var writer in _writers.Values) {
+      cancellationToken.ThrowIfCancellationRequested();
+      try {
+        await writer.FlushAsync(cancellationToken);
+      } catch (ObjectDisposedException) {
+        // Writer already disposed (e.g. after rotation), ignore.
+      }
+    }
+  }
+
+  /// <summary>
   /// Validates a stream name for filesystem compatibility.
   /// </summary>
   private static void ValidateStreamName(string stream)
