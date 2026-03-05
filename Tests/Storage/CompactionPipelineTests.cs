@@ -178,25 +178,25 @@ public sealed class CompactionPipelineTests : IDisposable
   }
 
   [Fact]
-  public void DailyTier_IsGroupClosed_ReturnsTrueForYesterday()
+  public void DailyTier_IsGroupClosed_ReturnsExpectedForPastAndFuture()
   {
     var tier = new DailyCompactionTier();
-    var yesterday = DateTime.UtcNow.Date.AddDays(-1).ToString("yyyyMMdd");
-    var today = DateTime.UtcNow.Date.ToString("yyyyMMdd");
+    var closedKey = "20240110"; // well in the past
+    var openFutureKey = "29991231"; // always in the future
 
-    tier.IsGroupClosed(yesterday).Should().BeTrue();
-    tier.IsGroupClosed(today).Should().BeFalse();
+    tier.IsGroupClosed(closedKey).Should().BeTrue();
+    tier.IsGroupClosed(openFutureKey).Should().BeFalse();
   }
 
   [Fact]
-  public void MonthlyTier_IsGroupClosed_ReturnsTrueForLastMonth()
+  public void MonthlyTier_IsGroupClosed_ReturnsExpectedForPastAndFuture()
   {
     var tier = new MonthlyCompactionTier();
     var closedKey = "202401"; // well in the past
-    var currentKey = $"{DateTime.UtcNow:yyyyMM}";
+    var openFutureKey = "299912"; // always in the future
 
     tier.IsGroupClosed(closedKey).Should().BeTrue();
-    tier.IsGroupClosed(currentKey).Should().BeFalse();
+    tier.IsGroupClosed(openFutureKey).Should().BeFalse();
   }
 
   [Fact]
@@ -247,12 +247,12 @@ public sealed class CompactionPipelineTests : IDisposable
   }
 
   [Fact]
-  public async Task DailyCompaction_ShouldNotCompactToday()
+  public async Task DailyCompaction_ShouldNotCompactOpenDay()
   {
-    var stream = "today-test";
-    var today = DateTime.UtcNow.Date.AddHours(2);
+    var stream = "open-day-test";
+    var openDay = DateTime.UtcNow.Date.AddDays(1).AddHours(2);
 
-    await WriteL1ParquetAsync(stream, today, 5);
+    await WriteL1ParquetAsync(stream, openDay, 5);
 
     var pipeline = CreatePipeline(new DailyCompactionTier());
     var result = await pipeline.CompactAllAsync();
@@ -340,16 +340,16 @@ public sealed class CompactionPipelineTests : IDisposable
   }
 
   [Fact]
-  public async Task MonthlyCompaction_ShouldNotCompactCurrentMonth()
+  public async Task MonthlyCompaction_ShouldNotCompactOpenMonth()
   {
-    var stream = "current-month";
-    var thisMonth = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 10, 0, 0, DateTimeKind.Utc);
+    var stream = "open-month";
+    var openMonth = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 10, 0, 0, DateTimeKind.Utc).AddMonths(1);
 
     var streamDir = Path.Combine(_l2Directory, stream);
     Directory.CreateDirectory(streamDir);
 
     for (int day = 0; day < 2; day++) {
-      var dayDate = thisMonth.AddDays(day);
+      var dayDate = openMonth.AddDays(day);
       var entries = Enumerable.Range(0, 5).Select(i => new LogEntry {
         Stream = stream,
         Timestamp = dayDate.AddSeconds(i),

@@ -351,13 +351,29 @@ public static class SqlValidator
       var col = match.Groups["col"].Value;
       var tick = match.Groups["tick"].Value;
 
-      if (!TickExpressionParser.TryParse(tick, now, out var range))
+      if (!TickExpressionParser.TryParse(tick, now,
+              out IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> intervals))
         return match.Value; // leave unrecognised expressions untouched
 
-      var start = TickExpressionParser.FormatTimestamp(range.Start);
-      var end = TickExpressionParser.FormatTimestamp(range.End);
+      if (intervals.Count == 1)
+      {
+        var start = TickExpressionParser.FormatTimestamp(intervals[0].Start);
+        var end = TickExpressionParser.FormatTimestamp(intervals[0].End);
+        return $"{col} BETWEEN '{start}' AND '{end}'";
+      }
 
-      return $"{col} BETWEEN '{start}' AND '{end}'";
+      // Multiple intervals → parenthesised OR chain
+      var parts = new System.Text.StringBuilder();
+      parts.Append('(');
+      for (int i = 0; i < intervals.Count; i++)
+      {
+        if (i > 0) parts.Append(" OR ");
+        var s = TickExpressionParser.FormatTimestamp(intervals[i].Start);
+        var e = TickExpressionParser.FormatTimestamp(intervals[i].End);
+        parts.Append($"{col} BETWEEN '{s}' AND '{e}'");
+      }
+      parts.Append(')');
+      return parts.ToString();
     });
   }
 
