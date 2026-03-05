@@ -323,4 +323,44 @@ public class LiveQueryRefreshTests : IDisposable
     var registered = _queryService.GetRegisteredStreams();
     registered.Should().Contain(streamNames);
   }
+
+  /// <summary>
+  /// Regression: RefreshStreamsAsync (called by CompactorService after compaction)
+  /// must not drop the hot buffer table from the view. A previous bug had
+  /// RegisterStreamTablesAsync recreating the view from parquet files only,
+  /// silently discarding all hot-buffer rows and causing wild row-count jumps.
+  /// </summary>
+  [Fact]
+  public async Task RefreshStreamsAsync_ShouldPreserveHotBufferData()
+  {
+    // Populate hot buffer
+    var entries = Enumerable.Range(1, 10).Select(i => new LogEntry {
+      Stream = "refresh-preserve",
+      Timestamp = DateTime.UtcNow.AddSeconds(-i),
+      Level = "info",
+      Message = $"hot entry {i}"
+    }).ToList();
+
+    foreach (var e in entries)
+      _hotBuffer.Append("refresh-preserve", "/wal/001.wal", entries.IndexOf(e) * 50, e);
+
+    var snapshot = _hotBuffer.TakeSnapshot("refresh-preserve");
+    await _queryService.RefreshHotBufferAsync("refresh-preserve", snapshot);
+
+    // Verify hot data is queryable
+    var before = await _queryService.ExecuteQueryAsync(
+        "SELECT COUNT(*) as cnt FROM \"refresh-preserve\"");
+    var countBefore = (long)before.Rows[0]["cnt"];
+    countBefore.Should().Be(10);
+
+    // Simulate what CompactorService does after compaction
+    await _queryService.RefreshStreamsAsync();
+
+    // Hot buffer rows must still be visible after the view refresh
+    var after = await _queryService.ExecuteQueryAsync(
+        "SELECT COUNT(*) as cnt FROM \"refresh-preserve\"");
+    var countAfter = (long)after.Rows[0]["cnt"];
+    countAfter.Should().Be(countBefore,
+        "RefreshStreamsAsync must not drop hot-buffer rows from the view");
+  }
 }

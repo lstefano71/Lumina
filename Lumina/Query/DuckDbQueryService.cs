@@ -101,12 +101,11 @@ public sealed class DuckDbQueryService : IDisposable
       cancellationToken.ThrowIfCancellationRequested();
 
       try {
-        var createViewSql = mapping.GetCreateViewSql();
-        await ExecuteNonQueryAsync(createViewSql, cancellationToken);
-
-        lock (_registrationLock) {
-          _registeredStreams.Add(mapping.StreamName);
-        }
+        // Use RebuildStreamViewAsync so the hot table (if any) is always
+        // included in the view. Previously this called GetCreateViewSql()
+        // which produced a parquet-only view, silently dropping hot-buffer
+        // rows and causing query row-counts to jump up and down.
+        await RebuildStreamViewAsync(mapping.StreamName, cancellationToken);
 
         registered.Add(mapping.StreamName);
         _logger.LogDebug("Registered stream '{Stream}' as view with {FileCount} files",
@@ -146,17 +145,8 @@ public sealed class DuckDbQueryService : IDisposable
     }
 
     try {
-      // Drop existing view if any
-      var dropViewSql = mapping.GetDropViewSql();
-      await ExecuteNonQueryAsync(dropViewSql, cancellationToken);
-
-      // Create new view
-      var createViewSql = mapping.GetCreateViewSql();
-      await ExecuteNonQueryAsync(createViewSql, cancellationToken);
-
-      lock (_registrationLock) {
-        _registeredStreams.Add(streamName);
-      }
+      // Use RebuildStreamViewAsync to preserve the hot table in the view.
+      await RebuildStreamViewAsync(streamName, cancellationToken);
 
       _logger.LogDebug("Registered stream '{Stream}' as view", streamName);
       return true;

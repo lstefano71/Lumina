@@ -277,4 +277,60 @@ public sealed class QueryAfterCompactionTests : IDisposable
         $"SELECT count(*) AS cnt FROM \"{stream}\"");
     ((long)result2.Rows[0]["cnt"]).Should().Be(10);
   }
+
+  /// <summary>
+  /// Regression: when compaction triggers RefreshStreamsAsync, the view must
+  /// still include hot-buffer rows. A previous bug rebuilt the view from
+  /// parquet files only, causing row counts to drop and then jump back up
+  /// on the next LiveQueryRefreshService tick.
+  /// </summary>
+  [Fact]
+  public async Task RefreshStreams_AfterCompaction_PreservesHotBufferRows()
+  {
+    var stream = "hot-plus-parquet";
+    var yesterday = DateTime.UtcNow.Date.AddDays(-1).AddHours(10);
+
+    // Write parquet data and compact
+    await WriteL1ParquetAsync(stream, yesterday, 5);
+    await WriteL1ParquetAsync(stream, yesterday.AddHours(1), 5);
+
+    var parquetManager = CreateParquetManager();
+    using var queryService = CreateQueryService(parquetManager);
+    await queryService.InitializeAsync();
+
+    // Add hot-buffer entries (simulating recent ingestion not yet compacted)
+    var hotBuffer = new Lumina.Storage.Wal.WalHotBuffer();
+    var hotEntries = Enumerable.Range(0, 8).Select(i => new LogEntry {
+      Stream = stream,
+      Timestamp = DateTime.UtcNow.AddSeconds(-i),
+      Level = "debug",
+      Message = $"hot-{i}"
+    }).ToList();
+
+    foreach (var e in hotEntries)
+      hotBuffer.Append(stream, "/wal/001.wal", hotEntries.IndexOf(e) * 50, e);
+
+    var snapshot = hotBuffer.TakeSnapshot(stream);
+    await queryService.RefreshHotBufferAsync(stream, snapshot);
+
+    // Total should be parquet(10) + hot(8)
+    var before = await queryService.ExecuteQueryAsync(
+        $"SELECT COUNT(*) AS cnt FROM \"{stream}\"");
+    var expectedTotal = (long)before.Rows[0]["cnt"];
+    expectedTotal.Should().Be(18);
+
+    // Simulate compaction: daily merge, delete old files, refresh views
+    var pipeline = CreatePipeline(new DailyCompactionTier());
+    var compacted = await pipeline.CompactAllAsync();
+    foreach (var files in compacted.PendingDeletions.Values)
+      pipeline.DeleteSourceFiles(files);
+
+    await queryService.RefreshStreamsAsync();
+
+    // Row count must be stable — compacted parquet(10) + hot(8)
+    var after = await queryService.ExecuteQueryAsync(
+        $"SELECT COUNT(*) AS cnt FROM \"{stream}\"");
+    ((long)after.Rows[0]["cnt"]).Should().Be(expectedTotal,
+        "RefreshStreamsAsync after compaction must not discard hot-buffer rows");
+  }
 }
