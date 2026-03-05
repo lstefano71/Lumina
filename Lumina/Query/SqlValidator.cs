@@ -355,8 +355,7 @@ public static class SqlValidator
               out IReadOnlyList<(DateTimeOffset Start, DateTimeOffset End)> intervals))
         return match.Value; // leave unrecognised expressions untouched
 
-      if (intervals.Count == 1)
-      {
+      if (intervals.Count == 1) {
         var start = TickExpressionParser.FormatTimestamp(intervals[0].Start);
         var end = TickExpressionParser.FormatTimestamp(intervals[0].End);
         return $"{col} BETWEEN '{start}' AND '{end}'";
@@ -365,8 +364,7 @@ public static class SqlValidator
       // Multiple intervals → parenthesised OR chain
       var parts = new System.Text.StringBuilder();
       parts.Append('(');
-      for (int i = 0; i < intervals.Count; i++)
-      {
+      for (int i = 0; i < intervals.Count; i++) {
         if (i > 0) parts.Append(" OR ");
         var s = TickExpressionParser.FormatTimestamp(intervals[i].Start);
         var e = TickExpressionParser.FormatTimestamp(intervals[i].End);
