@@ -90,7 +90,7 @@ public static class ParquetWriter
     foreach (var column in schema) {
       pairs.Add(column.Name switch {
         "_s" => (CreateDataField("_s", typeof(string), column.IsNullable), entries.Select(e => e.Stream).ToArray()),
-        "_t" => (new DateTimeDataField("_t", DateTimeFormat.DateAndTimeMicros, isAdjustedToUTC: true, unit: null, isNullable: column.IsNullable), entries.Select(e => e.Timestamp.ToUniversalTime()).ToArray()),
+        "_t" => (new DataField<DateTime>("_t", column.IsNullable), entries.Select(e => e.Timestamp.ToUniversalTime()).ToArray()),
         "_l" => (CreateDataField("_l", typeof(string), column.IsNullable), entries.Select(e => e.Level).ToArray()),
         "_m" => (CreateDataField("_m", typeof(string), column.IsNullable), entries.Select(e => e.Message).ToArray()),
         "_traceid" => (CreateDataField("_traceid", typeof(string), column.IsNullable), entries.Select(e => e.TraceId).ToArray()),
@@ -123,8 +123,8 @@ public static class ParquetWriter
           e.Attributes.TryGetValue(key, out var value) && value is double v ? v : (double?)null).ToArray()),
       SchemaType.Binary => (CreateDataField(key, typeof(byte[]), column.IsNullable), entries.Select(e =>
           e.Attributes.TryGetValue(key, out var value) && value is byte[] v ? v : null).ToArray()),
-      SchemaType.Timestamp => (new DateTimeDataField(key, DateTimeFormat.DateAndTimeMicros, isAdjustedToUTC: true, unit: null, isNullable: column.IsNullable), entries.Select(e =>
-          e.Attributes.TryGetValue(key, out var value) && value is DateTime v ? v.ToUniversalTime() : (DateTime?)null).ToArray()),
+      SchemaType.Timestamp => (new DataField<DateTime?>(key, column.IsNullable), entries.Select(e =>
+        e.Attributes.TryGetValue(key, out var value) && value is DateTime v ? v.ToUniversalTime() : (DateTime?)null).ToArray()),
       _ => (CreateDataField(key, typeof(string), column.IsNullable), entries.Select(e =>
           e.Attributes.TryGetValue(key, out var value) && value != null ? value.ToString() : null).ToArray())
     };

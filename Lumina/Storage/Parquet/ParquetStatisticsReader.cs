@@ -28,30 +28,28 @@ public static class ParquetStatisticsReader
         return null;
       }
 
-      int fieldIndex = Array.IndexOf(dataFields.ToArray(), timeField);
-      if (fieldIndex < 0) return null;
-
       DateTime? minTime = null;
       DateTime? maxTime = null;
 
       for (int i = 0; i < reader.RowGroupCount; i++) {
         cancellationToken.ThrowIfCancellationRequested();
         using var rowGroupReader = reader.OpenRowGroupReader(i);
+        var stats = rowGroupReader.GetStatistics(timeField);
+        if (stats == null) continue;
 
-        var meta = rowGroupReader.RowGroup.Columns[fieldIndex].MetaData;
-        if (meta != null && meta.Statistics != null) {
-          var stats = meta.Statistics;
+        DateTime? sMin = stats.MinValue switch {
+          DateTimeOffset dto => dto.UtcDateTime,
+          DateTime dt => dt,
+          _ => null
+        };
+        DateTime? sMax = stats.MaxValue switch {
+          DateTimeOffset dto => dto.UtcDateTime,
+          DateTime dt => dt,
+          _ => null
+        };
 
-          if (stats.Min != null) {
-            DateTime? dMin = DecodeDateTimeBytes(stats.Min);
-            if (dMin != null && (minTime == null || dMin < minTime)) minTime = dMin;
-          }
-
-          if (stats.Max != null) {
-            DateTime? dMax = DecodeDateTimeBytes(stats.Max);
-            if (dMax != null && (maxTime == null || dMax > maxTime)) maxTime = dMax;
-          }
-        }
+        if (sMin != null && (minTime == null || sMin < minTime)) minTime = sMin;
+        if (sMax != null && (maxTime == null || sMax > maxTime)) maxTime = sMax;
       }
 
       if (minTime.HasValue && maxTime.HasValue) {
@@ -62,32 +60,6 @@ public static class ParquetStatisticsReader
     } catch (Exception) {
       // If we can't read the file, return null
       return null;
-    }
-  }
-
-  /// <summary>
-  /// Decodes raw Parquet Int64 timestamp bytes based on typical epoch heuristics.
-  /// </summary>
-  private static DateTime? DecodeDateTimeBytes(byte[] bytes)
-  {
-    if (bytes == null || bytes.Length < 8) return null;
-
-    long val = BitConverter.ToInt64(bytes, 0);
-
-    // Heuristic map to correctly decode the timestamp based on magnitude
-    // Milliseconds in recent years are ~1.7e12
-    // Microseconds in recent years are ~1.7e15
-    // Ticks are ~6.3e17
-
-    if (val > 100000000000000000L) {
-      // Likely Ticks since 0001-01-01
-      return new DateTime(val, DateTimeKind.Utc);
-    } else if (val > 100000000000000L) {
-      // Likely Microseconds since 1970-01-01
-      return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddTicks(val * 10);
-    } else {
-      // Likely Milliseconds since 1970-01-01
-      return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(val);
     }
   }
 

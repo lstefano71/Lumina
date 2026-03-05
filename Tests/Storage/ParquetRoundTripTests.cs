@@ -217,6 +217,35 @@ public class ParquetRoundTripTests : WalTestBase
     await act.Should().ThrowAsync<Exception>();
   }
 
+  [Fact]
+  public async Task WriteBatchAsync_TimestampColumnStats_ShouldMatchDataRange()
+  {
+    var outputPath = Path.Combine(TempDirectory, "stats_ts.parquet");
+    var t1 = new DateTime(2026, 3, 5, 14, 21, 50, DateTimeKind.Utc).AddTicks(1230);
+    var t2 = t1.AddSeconds(10);
+    var t3 = t1.AddSeconds(20);
+
+    var entries = new[] {
+      new LogEntry { Stream = "test-stream", Timestamp = t2, Level = "info", Message = "b", Attributes = new Dictionary<string, object?>() },
+      new LogEntry { Stream = "test-stream", Timestamp = t1, Level = "info", Message = "a", Attributes = new Dictionary<string, object?>() },
+      new LogEntry { Stream = "test-stream", Timestamp = t3, Level = "info", Message = "c", Attributes = new Dictionary<string, object?>() }
+    };
+
+    await ParquetWriter.WriteBatchAsync(entries, outputPath);
+
+    await using var fs = File.OpenRead(outputPath);
+    using var reader = await global::Parquet.ParquetReader.CreateAsync(fs);
+    using var rg = reader.OpenRowGroupReader(0);
+    var tsField = reader.Schema.GetDataFields().Single(f => f.Name == "_t");
+    var stats = rg.GetStatistics(tsField);
+
+    stats.Should().NotBeNull();
+    var minDt = stats!.MinValue is DateTimeOffset minDto ? minDto.UtcDateTime : (DateTime)stats.MinValue!;
+    var maxDt = stats.MaxValue is DateTimeOffset maxDto ? maxDto.UtcDateTime : (DateTime)stats.MaxValue!;
+    minDt.Should().Be(t1);
+    maxDt.Should().Be(t3);
+  }
+
   private static LogEntry CreateEntry(string message = "test", string level = "info")
   {
     return new LogEntry {
