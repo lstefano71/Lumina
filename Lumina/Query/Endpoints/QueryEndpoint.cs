@@ -132,6 +132,10 @@ public static class QueryEndpoint
     // double-quoted SQL identifiers before validation and execution.
     sql = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
 
+    // Rewrite QuestDB-style TICK interval expressions (e.g. ts IN '$now - 5m..$now')
+    // into standard SQL BETWEEN clauses so DuckDB can push filters to Parquet files.
+    sql = SqlValidator.RewriteTickIntervals(sql);
+
     // Validate SQL if validation is enabled
     if (settings.EnableSqlValidation) {
       var (isValid, error) = SqlValidator.IsValidSelectQuery(sql);

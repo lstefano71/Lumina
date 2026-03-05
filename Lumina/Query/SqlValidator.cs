@@ -320,6 +320,48 @@ public static class SqlValidator
     return AllowedReadFunctions.Contains(functionName);
   }
 
+  // Matches: <identifier> IN '<tick expression>' where the tick expression contains
+  // range operators (..), duration separators (;), or $ variables that indicate
+  // a TICK interval rather than a normal SQL IN ('value') literal.
+  private static readonly Regex TickInPattern = new(
+      @"(?<col>[A-Za-z_][A-Za-z0-9_.]*|""[^""]+"")\s+[Ii][Nn]\s+'(?<tick>[^']*(?:\$|\.\.)[^']*)'",
+      RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+  /// <summary>
+  /// Rewrites QuestDB-style TICK interval expressions into standard SQL BETWEEN clauses.
+  /// <para>
+  /// Matches patterns like <c>ts IN '$now - 5m..$now'</c> and rewrites them to
+  /// <c>ts BETWEEN '2024-01-01 12:00:00.000000' AND '2024-01-01 12:05:00.000000'</c>.
+  /// This runs <b>before</b> DuckDB sees the query, so Parquet min/max pushdown is preserved.
+  /// </para>
+  /// <para>Expressions that fail to parse are left untouched.</para>
+  /// </summary>
+  public static string RewriteTickIntervals(string sql)
+    => RewriteTickIntervals(sql, DateTimeOffset.UtcNow);
+
+  /// <summary>
+  /// Overload that accepts an explicit <paramref name="now"/> for deterministic testing.
+  /// </summary>
+  public static string RewriteTickIntervals(string sql, DateTimeOffset now)
+  {
+    if (string.IsNullOrWhiteSpace(sql))
+      return sql;
+
+    return TickInPattern.Replace(sql, match =>
+    {
+      var col = match.Groups["col"].Value;
+      var tick = match.Groups["tick"].Value;
+
+      if (!TickExpressionParser.TryParse(tick, now, out var range))
+        return match.Value; // leave unrecognised expressions untouched
+
+      var start = TickExpressionParser.FormatTimestamp(range.Start);
+      var end = TickExpressionParser.FormatTimestamp(range.End);
+
+      return $"{col} BETWEEN '{start}' AND '{end}'";
+    });
+  }
+
   // Matches: FROM/JOIN 'stream-name' (single-quoted identifier in a table reference position)
   private static readonly Regex SingleQuotedTablePattern = new(
       @"(?<=[Ff][Rr][Oo][Mm]|[Jj][Oo][Ii][Nn])\s+'([^']+)'",

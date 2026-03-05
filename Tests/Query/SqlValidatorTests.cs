@@ -323,4 +323,98 @@ public class SqlValidatorTests
     Assert.Contains("\"my-stream\"", result);
     Assert.DoesNotContain("'my-stream'", result);
   }
+
+  // -----------------------------------------------------------------------
+  // RewriteTickIntervals
+  // -----------------------------------------------------------------------
+
+  // Fixed clock for deterministic SQL rewrite tests
+  private static readonly DateTimeOffset FixedNow =
+      new(2025, 6, 15, 12, 0, 0, TimeSpan.Zero);
+
+  [Fact]
+  public void RewriteTickIntervals_SimpleRange_RewritesToBetween()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '$now - 5m..$now'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN '2025-06-15 11:55:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+    Assert.DoesNotContain("$now", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_DurationSyntax_RewritesToBetween()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '$now - 1h;30m'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN '2025-06-15 11:00:00.000000' AND '2025-06-15 11:30:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_IsoLiterals_RewritesToBetween()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '2025-01-10T09:00:00..2025-01-10T17:00:00'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN '2025-01-10 09:00:00.000000' AND '2025-01-10 17:00:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_DoubleQuotedColumnName_Works()
+  {
+    var sql = "SELECT * FROM logs WHERE \"Timestamp\" IN '$now - 10m..$now'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("\"Timestamp\" BETWEEN '2025-06-15 11:50:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_VariablesCaseInsensitive()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '$TODAY..$NOW'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN '2025-06-15 00:00:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_NoTickExpression_Unchanged()
+  {
+    var sql = "SELECT * FROM logs WHERE level = 'error'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Equal(sql, result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_InvalidTickExpression_LeftUntouched()
+  {
+    // This string contains $ but is not a valid tick expression
+    var sql = "SELECT * FROM logs WHERE ts IN '$bogus'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Equal(sql, result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_MultipleTickExpressions_AllRewritten()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '$now - 1h..$now' AND created IN '$today..$now'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN '2025-06-15 11:00:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+    Assert.Contains("created BETWEEN '2025-06-15 00:00:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_CoexistsWithStringLiterals()
+  {
+    // The WHERE clause has both a tick expression and a normal string literal
+    var sql = "SELECT * FROM logs WHERE ts IN '$now - 5m..$now' AND level = 'error'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN", result);
+    Assert.Contains("level = 'error'", result);
+  }
 }
