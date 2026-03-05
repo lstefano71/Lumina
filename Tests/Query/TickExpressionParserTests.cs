@@ -42,6 +42,7 @@ public class TickExpressionParserTests
     var r = ParseSingle("$today");
     var expected = new DateTimeOffset(2025, 6, 15, 0, 0, 0, TimeSpan.Zero);
     Assert.Equal(expected, r.Start);
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 23, 59, 59, TimeSpan.Zero).AddTicks(9_999_990), r.End);
   }
 
   [Fact]
@@ -69,6 +70,7 @@ public class TickExpressionParserTests
   {
     var r = ParseSingle("2025-01-10");
     Assert.Equal(new DateTimeOffset(2025, 1, 10, 0, 0, 0, TimeSpan.Zero), r.Start);
+    Assert.Equal(new DateTimeOffset(2025, 1, 10, 23, 59, 59, TimeSpan.Zero).AddTicks(9_999_990), r.End);
   }
 
   [Fact]
@@ -180,7 +182,39 @@ public class TickExpressionParserTests
   {
     var r = ParseSingle("$yesterday..$today");
     Assert.Equal(new DateTimeOffset(2025, 6, 14, 0, 0, 0, TimeSpan.Zero), r.Start);
-    Assert.Equal(new DateTimeOffset(2025, 6, 15, 0, 0, 0, TimeSpan.Zero), r.End);
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 23, 59, 59, TimeSpan.Zero).AddTicks(9_999_990), r.End);
+  }
+
+  [Theory]
+  [InlineData("2025-01-10@UTC", 0)]
+  [InlineData("2025-01-10@Z", 0)]
+  [InlineData("2025-01-10@+02:00", 2)]
+  [InlineData("2025-01-10@+03", 3)]
+  [InlineData("2025-01-10@-0500", -5)]
+  public void Parse_DateOnly_WithTimezoneOffset(string expr, int expectedHours)
+  {
+    var r = ParseSingle(expr);
+    Assert.Equal(TimeSpan.FromHours(expectedHours), r.Start.Offset);
+    Assert.Equal(new DateTimeOffset(2025, 1, 10, 0, 0, 0, TimeSpan.FromHours(expectedHours)), r.Start);
+    Assert.Equal(new DateTimeOffset(2025, 1, 10, 23, 59, 59, TimeSpan.FromHours(expectedHours)).AddTicks(9_999_990), r.End);
+  }
+
+  [Fact]
+  public void Parse_Today_WithTimezoneOffset_UsesTimezoneDay()
+  {
+    var r = ParseSingle("$today@+02:00");
+    Assert.Equal(TimeSpan.FromHours(2), r.Start.Offset);
+    Assert.Equal(new DateTimeOffset(2025, 6, 15, 0, 0, 0, TimeSpan.FromHours(2)), r.Start);
+  }
+
+  [Fact]
+  public void Parse_DateList_WithPerElementTimezone_Works()
+  {
+    var intervals = ParseMulti("[2024-01-15@UTC,2024-01-17@+02:00]");
+
+    Assert.Equal(2, intervals.Count);
+    Assert.Equal(TimeSpan.Zero, intervals[0].Start.Offset);
+    Assert.Equal(TimeSpan.FromHours(2), intervals[1].Start.Offset);
   }
 
   [Fact]

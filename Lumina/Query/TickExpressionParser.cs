@@ -223,6 +223,7 @@ public static class TickExpressionParser
     Semicolon,      // ;
     Plus,           // +
     Minus,          // -
+    Timezone,       // @UTC, @Z, @+02:00, @-0500, @local
     Variable,       // $now, $today, etc.
     IsoLiteral,     // 2024-01-15 or 2024-01-15T09:30:00.123
     Number,         // plain integer (used inside brackets: day/month numbers)
@@ -252,6 +253,14 @@ public static class TickExpressionParser
         if (c == ',') { tokens.Add(new Token(TokenKind.Comma, ",")); pos++; continue; }
         if (c == ';') { tokens.Add(new Token(TokenKind.Semicolon, ";")); pos++; continue; }
         if (c == '+') { tokens.Add(new Token(TokenKind.Plus, "+")); pos++; continue; }
+
+        if (c == '@') {
+          if (TryConsumeTimezone(input, ref pos, out var tzToken)) {
+            tokens.Add(tzToken);
+            continue;
+          }
+          return tokens;
+        }
 
         if (c == '-') {
           // Disambiguate: operator vs part of ISO date/continuation
@@ -376,6 +385,31 @@ public static class TickExpressionParser
       return true;
     }
 
+    private static bool TryConsumeTimezone(string input, ref int pos, out Token token)
+    {
+      token = default;
+      int start = pos;
+      if (input[pos] != '@')
+        return false;
+
+      pos++; // consume @
+      int payloadStart = pos;
+      while (pos < input.Length) {
+        char c = input[pos];
+        if (char.IsWhiteSpace(c) || c == ',' || c == ';' || c == '[' || c == ']' || c == '.')
+          break;
+        pos++;
+      }
+
+      if (pos <= payloadStart) {
+        pos = start;
+        return false;
+      }
+
+      token = new Token(TokenKind.Timezone, input[start..pos]);
+      return true;
+    }
+
     /// <summary>
     /// Consumes a time suffix starting with T, e.g. T09:30, T09:30:15.123.
     /// Produces an IsoLiteral token with the T prefix.
@@ -462,6 +496,12 @@ public static class TickExpressionParser
     public int End { get; } = end;
   }
 
+  internal sealed class TimezoneNode(AstNode inner, string timezone) : AstNode
+  {
+    public AstNode Inner { get; } = inner;
+    public string Timezone { get; } = timezone;
+  }
+
   // ########################################################################
   //  PARSER  (Recursive Descent)
   // ########################################################################
@@ -487,6 +527,7 @@ public static class TickExpressionParser
       } else if (Peek(tokens, pos) == TokenKind.Variable) {
         node = new VariableNode(tokens[pos].Text);
         pos++;
+        node = ParseOptionalTimezone(tokens, ref pos, node);
         node = TryParseArithmetic(tokens, ref pos, node);
       } else {
         return null;
@@ -520,9 +561,11 @@ public static class TickExpressionParser
       if (Peek(tokens, pos) == TokenKind.Variable) {
         node = new VariableNode(tokens[pos].Text);
         pos++;
+        node = ParseOptionalTimezone(tokens, ref pos, node);
       } else if (Peek(tokens, pos) == TokenKind.IsoLiteral) {
         node = new LiteralNode(tokens[pos].Text);
         pos++;
+        node = ParseOptionalTimezone(tokens, ref pos, node);
       } else {
         return null;
       }
@@ -555,10 +598,14 @@ public static class TickExpressionParser
       pos++;
 
       if (pos < tokens.Count && Peek(tokens, pos) == TokenKind.LBracket) {
-        return ParseBracketExpansion(isoText, tokens, ref pos);
+        var expansion = ParseBracketExpansion(isoText, tokens, ref pos);
+        if (expansion == null)
+          return null;
+        return ParseOptionalTimezone(tokens, ref pos, expansion);
       }
 
-      return new LiteralNode(isoText);
+      AstNode node = new LiteralNode(isoText);
+      return ParseOptionalTimezone(tokens, ref pos, node);
     }
 
     private static AstNode? ParseBracketExpansion(string prefix, List<Token> tokens, ref int pos)
@@ -693,14 +740,16 @@ public static class TickExpressionParser
       }
 
       if (kind == TokenKind.IsoLiteral) {
-        var node = new LiteralNode(tokens[pos].Text);
+        AstNode node = new LiteralNode(tokens[pos].Text);
         pos++;
+        node = ParseOptionalTimezone(tokens, ref pos, node);
         return TryParseArithmetic(tokens, ref pos, node) as AstNode;
       }
 
       if (kind == TokenKind.Variable) {
         AstNode node = new VariableNode(tokens[pos].Text);
         pos++;
+        node = ParseOptionalTimezone(tokens, ref pos, node);
         return TryParseArithmetic(tokens, ref pos, node);
       }
 
@@ -743,6 +792,7 @@ public static class TickExpressionParser
       if (kind == TokenKind.Variable) {
         AstNode node = new VariableNode(tokens[pos].Text);
         pos++;
+        node = ParseOptionalTimezone(tokens, ref pos, node);
         return TryParseArithmetic(tokens, ref pos, node);
       }
 
@@ -766,7 +816,8 @@ public static class TickExpressionParser
         var k = tokens[pos].Kind;
         if (k == TokenKind.DotDot || k == TokenKind.Semicolon ||
             k == TokenKind.LBracket || k == TokenKind.RBracket ||
-            k == TokenKind.Comma || k == TokenKind.Plus || k == TokenKind.Minus)
+            k == TokenKind.Comma || k == TokenKind.Plus || k == TokenKind.Minus ||
+            k == TokenKind.Timezone)
           break;
 
         sb.Append(tokens[pos].Text);
@@ -788,6 +839,17 @@ public static class TickExpressionParser
       return true;
     }
 
+    private static AstNode ParseOptionalTimezone(List<Token> tokens, ref int pos, AstNode node)
+    {
+      if (pos < tokens.Count && Peek(tokens, pos) == TokenKind.Timezone) {
+        var tz = tokens[pos].Text;
+        pos++;
+        return new TimezoneNode(node, tz);
+      }
+
+      return node;
+    }
+
     private static TokenKind? Peek(List<Token> tokens, int pos)
       => pos < tokens.Count ? tokens[pos].Kind : null;
   }
@@ -798,6 +860,8 @@ public static class TickExpressionParser
 
   internal static class Evaluator
   {
+    private readonly record struct Anchor(DateTimeOffset Value, bool IsDateOnly);
+
     public static List<(DateTimeOffset Start, DateTimeOffset End)> Evaluate(AstNode node, DateTimeOffset now)
     {
       switch (node) {
@@ -807,13 +871,13 @@ public static class TickExpressionParser
             var result = new List<(DateTimeOffset, DateTimeOffset)>();
             foreach (var s in starts)
               foreach (var e in ends)
-                result.Add((s, e));
+                result.Add((s.Value, e.IsDateOnly ? EndOfDayInclusive(e.Value) : e.Value));
             return result;
           }
 
         case DurationSuffixNode dsn: {
             var anchors = EvaluateAnchors(dsn.Anchor, now);
-            return anchors.Select(a => (a, a + dsn.Duration)).ToList();
+            return anchors.Select(a => (a.Value, a.Value + dsn.Duration)).ToList();
           }
 
         case ListNode ln: {
@@ -827,34 +891,40 @@ public static class TickExpressionParser
 
         case BracketExpansionNode ben: {
             var anchors = ExpandBrackets(ben, now);
-            return anchors.Select(a => (a, a)).ToList();
+            return anchors.Select(a => (a.Value, a.IsDateOnly ? EndOfDayInclusive(a.Value) : a.Value)).ToList();
+          }
+
+        case TimezoneNode tzn: {
+            var anchors = EvaluateAnchors(tzn, now);
+            return anchors.Select(a => (a.Value, a.IsDateOnly ? EndOfDayInclusive(a.Value) : a.Value)).ToList();
           }
 
         default: {
             var anchors = EvaluateAnchors(node, now);
-            return anchors.Select(a => (a, a)).ToList();
+            return anchors.Select(a => (a.Value, a.IsDateOnly ? EndOfDayInclusive(a.Value) : a.Value)).ToList();
           }
       }
     }
 
-    private static List<DateTimeOffset> EvaluateAnchors(AstNode node, DateTimeOffset now)
+    private static List<Anchor> EvaluateAnchors(AstNode node, DateTimeOffset now)
     {
       switch (node) {
         case VariableNode vn:
-          return new List<DateTimeOffset> { ResolveVariable(vn.Name, now) };
+          return new List<Anchor> { ResolveVariable(vn.Name, now) };
 
         case LiteralNode lit:
-          if (TryParseIso(lit.Text, out var dto))
-            return new List<DateTimeOffset> { dto };
-          return new List<DateTimeOffset>();
+          if (TryParseIso(lit.Text, out var dto, out var isDateOnly))
+            return new List<Anchor> { new(dto, isDateOnly) };
+          return new List<Anchor>();
 
         case ArithmeticNode an: {
             var bases = EvaluateAnchors(an.Base, now);
-            return bases.Select(b => an.Sign == '+' ? b + an.Duration : b - an.Duration).ToList();
+            var keepDateOnly = an.Duration.Ticks % TimeSpan.FromDays(1).Ticks == 0;
+            return bases.Select(b => new Anchor(an.Sign == '+' ? b.Value + an.Duration : b.Value - an.Duration, b.IsDateOnly && keepDateOnly)).ToList();
           }
 
         case ListNode ln: {
-            var result = new List<DateTimeOffset>();
+            var result = new List<Anchor>();
             foreach (var item in ln.Items)
               result.AddRange(EvaluateAnchors(item, now));
             return result;
@@ -863,15 +933,18 @@ public static class TickExpressionParser
         case BracketExpansionNode ben:
           return ExpandBrackets(ben, now);
 
+        case TimezoneNode tzn:
+          return EvaluateAnchorsInTimezone(tzn.Inner, tzn.Timezone, now);
+
         default:
-          return new List<DateTimeOffset>();
+          return new List<Anchor>();
       }
     }
 
-    private static List<DateTimeOffset> ExpandBrackets(BracketExpansionNode node, DateTimeOffset now)
+    private static List<Anchor> ExpandBrackets(BracketExpansionNode node, DateTimeOffset now)
     {
       var values = ExpandBracketItems(node.Items);
-      var results = new List<DateTimeOffset>();
+      var results = new List<Anchor>();
 
       foreach (var val in values) {
         var padded = val.ToString(CultureInfo.InvariantCulture).PadLeft(2, '0');
@@ -886,8 +959,8 @@ public static class TickExpressionParser
 
           results.AddRange(ExpandBrackets(nested, now));
         } else {
-          if (TryParseIso(dateStr, out var dto))
-            results.Add(dto);
+          if (TryParseIso(dateStr, out var dto, out var isDateOnly))
+            results.Add(new Anchor(dto, isDateOnly));
         }
       }
 
@@ -915,24 +988,126 @@ public static class TickExpressionParser
       return result;
     }
 
-    private static DateTimeOffset ResolveVariable(string name, DateTimeOffset now)
+    private static Anchor ResolveVariable(string name, DateTimeOffset now)
     {
       return name switch {
-        "$now" => now,
-        "$today" => new DateTimeOffset(now.Date, now.Offset),
-        "$yesterday" => new DateTimeOffset(now.Date.AddDays(-1), now.Offset),
-        "$tomorrow" => new DateTimeOffset(now.Date.AddDays(1), now.Offset),
-        _ => now
+        "$now" => new Anchor(now, false),
+        "$today" => new Anchor(new DateTimeOffset(now.Date, now.Offset), true),
+        "$yesterday" => new Anchor(new DateTimeOffset(now.Date.AddDays(-1), now.Offset), true),
+        "$tomorrow" => new Anchor(new DateTimeOffset(now.Date.AddDays(1), now.Offset), true),
+        _ => new Anchor(now, false)
       };
     }
 
-    private static bool TryParseIso(string text, out DateTimeOffset result)
+    private static bool TryParseIso(string text, out DateTimeOffset result, out bool isDateOnly)
     {
+      isDateOnly = !text.Contains('T', StringComparison.OrdinalIgnoreCase);
       return DateTimeOffset.TryParseExact(
           text, DateFormats,
           CultureInfo.InvariantCulture,
           DateTimeStyles.AssumeUniversal | DateTimeStyles.AllowWhiteSpaces,
           out result);
+    }
+
+    private static DateTimeOffset EndOfDayInclusive(DateTimeOffset startOfDay)
+      => new DateTimeOffset(startOfDay.Year, startOfDay.Month, startOfDay.Day, 23, 59, 59, startOfDay.Offset).AddTicks(9_999_990);
+
+    private static List<Anchor> EvaluateAnchorsInTimezone(AstNode inner, string timezoneToken, DateTimeOffset now)
+    {
+      if (!TryResolveTimezoneOffset(timezoneToken, now, out var targetOffset))
+        return new List<Anchor>();
+
+      if (inner is VariableNode vn) {
+        var zonedNow = now.ToOffset(targetOffset);
+        return vn.Name switch {
+          "$now" => new List<Anchor> { new(zonedNow, false) },
+          "$today" => new List<Anchor> { new(new DateTimeOffset(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, targetOffset), true) },
+          "$yesterday" => new List<Anchor> { new(new DateTimeOffset(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, targetOffset).AddDays(-1), true) },
+          "$tomorrow" => new List<Anchor> { new(new DateTimeOffset(zonedNow.Year, zonedNow.Month, zonedNow.Day, 0, 0, 0, targetOffset).AddDays(1), true) },
+          _ => new List<Anchor>()
+        };
+      }
+
+      if (inner is LiteralNode lit) {
+        if (!TryParseIso(lit.Text, out var parsed, out var isDateOnly))
+          return new List<Anchor>();
+
+        if (isDateOnly) {
+          var localMidnight = new DateTimeOffset(parsed.Year, parsed.Month, parsed.Day, 0, 0, 0, targetOffset);
+          return new List<Anchor> { new(localMidnight, true) };
+        }
+
+        // Literal with explicit offset/zone keeps its instant; otherwise interpret local clock in target offset.
+        if (HasExplicitOffset(lit.Text))
+          return new List<Anchor> { new(parsed.ToOffset(targetOffset), false) };
+
+        var local = new DateTimeOffset(parsed.Year, parsed.Month, parsed.Day, parsed.Hour, parsed.Minute, parsed.Second, targetOffset).AddTicks(parsed.TimeOfDay.Ticks % TimeSpan.TicksPerSecond);
+        return new List<Anchor> { new(local, false) };
+      }
+
+      var baseAnchors = EvaluateAnchors(inner, now);
+      return baseAnchors.Select(a => new Anchor(a.Value.ToOffset(targetOffset), a.IsDateOnly)).ToList();
+    }
+
+    private static bool TryResolveTimezoneOffset(string timezoneToken, DateTimeOffset now, out TimeSpan offset)
+    {
+      offset = default;
+      var tz = timezoneToken.Trim();
+      if (tz.StartsWith("@", StringComparison.Ordinal))
+        tz = tz[1..];
+
+      if (tz.Equals("UTC", StringComparison.OrdinalIgnoreCase) ||
+          tz.Equals("Z", StringComparison.OrdinalIgnoreCase)) {
+        offset = TimeSpan.Zero;
+        return true;
+      }
+
+      if (tz.Equals("local", StringComparison.OrdinalIgnoreCase)) {
+        offset = TimeZoneInfo.Local.GetUtcOffset(now.UtcDateTime);
+        return true;
+      }
+
+      if (Regex.IsMatch(tz, @"^[+-]\d{2}:\d{2}$", RegexOptions.CultureInvariant)) {
+        if (TimeSpan.TryParseExact(tz[1..], "hh\\:mm", CultureInfo.InvariantCulture, out var parsedColon)) {
+          offset = tz[0] == '-' ? -parsedColon : parsedColon;
+          return true;
+        }
+      }
+
+      if (Regex.IsMatch(tz, @"^[+-]\d{2}$", RegexOptions.CultureInvariant)) {
+        if (int.TryParse(tz, NumberStyles.Integer, CultureInfo.InvariantCulture, out var h)) {
+          offset = TimeSpan.FromHours(h);
+          return true;
+        }
+      }
+
+      if (Regex.IsMatch(tz, @"^[+-]\d{4}$", RegexOptions.CultureInvariant)) {
+        var sign = tz[0] == '-' ? -1 : 1;
+        if (int.TryParse(tz.Substring(1, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out var hh) &&
+            int.TryParse(tz.Substring(3, 2), NumberStyles.Integer, CultureInfo.InvariantCulture, out var mm)) {
+          offset = new TimeSpan(sign * hh, sign * mm, 0);
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    private static bool HasExplicitOffset(string text)
+    {
+      if (text.EndsWith("Z", StringComparison.OrdinalIgnoreCase))
+        return true;
+
+      var tIndex = text.IndexOf('T');
+      if (tIndex < 0)
+        return false;
+
+      for (int i = tIndex + 1; i < text.Length; i++) {
+        if (text[i] == '+' || text[i] == '-')
+          return true;
+      }
+
+      return false;
     }
   }
 }
