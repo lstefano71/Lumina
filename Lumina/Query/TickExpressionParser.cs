@@ -671,7 +671,9 @@ public static class TickExpressionParser
             timeText.StartsWith("T", StringComparison.OrdinalIgnoreCase))
           return null;
 
-        items.Add(new LiteralNode(datePrefix + timeText));
+        AstNode itemNode = new LiteralNode(datePrefix + timeText);
+        itemNode = ParseOptionalTimezone(tokens, ref pos, itemNode);
+        items.Add(itemNode);
       }
 
       if (pos >= tokens.Count || Peek(tokens, pos) != TokenKind.RBracket)

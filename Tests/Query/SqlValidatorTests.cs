@@ -417,6 +417,18 @@ public class SqlValidatorTests
   }
 
   [Fact]
+  public void RewriteTickIntervals_TimeListWithPerElementTimezones_Rewrites()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '2024-01-15T[09:30@America/New_York,08:00@Europe/London,09:00@Asia/Tokyo];6h'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN", result);
+    Assert.Contains("2024-01-15 00:00:00.000000", result); // Tokyo 09:00 -> 00:00 UTC
+    Assert.Contains("2024-01-15 08:00:00.000000", result); // London 08:00 -> 08:00 UTC
+    Assert.Contains("2024-01-15 14:30:00.000000", result); // New York 09:30 -> 14:30 UTC
+  }
+
+  [Fact]
   public void RewriteTickIntervals_IsoLiterals_RewritesToBetween()
   {
     var sql = "SELECT * FROM logs WHERE ts IN '2025-01-10T09:00:00..2025-01-10T17:00:00'";

@@ -283,6 +283,17 @@ public class TickExpressionParserTests
   }
 
   [Fact]
+  public void Parse_TimeListWithPerElementTimezonesAndDuration_Works()
+  {
+    var intervals = ParseMulti("2024-01-15T[09:30@America/New_York,08:00@Europe/London,09:00@Asia/Tokyo];6h");
+
+    Assert.Equal(3, intervals.Count);
+    Assert.Equal(new DateTimeOffset(2024, 1, 15, 9, 0, 0, TimeSpan.FromHours(9)), intervals[0].Start);
+    Assert.Equal(new DateTimeOffset(2024, 1, 15, 8, 0, 0, TimeSpan.Zero), intervals[1].Start);
+    Assert.Equal(new DateTimeOffset(2024, 1, 15, 9, 30, 0, TimeSpan.FromHours(-5)), intervals[2].Start);
+  }
+
+  [Fact]
   public void Parse_Range_IsoLiterals()
   {
     var r = ParseSingle("2025-01-10T09:00:00..2025-01-10T17:00:00");
