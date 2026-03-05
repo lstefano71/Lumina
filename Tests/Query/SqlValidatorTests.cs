@@ -361,6 +361,15 @@ public class SqlValidatorTests
   }
 
   [Fact]
+  public void RewriteTickIntervals_BracketExpansionWithoutDollarOrDuration_Rewrites()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '2026-03-[05,06]'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("(ts BETWEEN TIMESTAMP '2026-03-05 00:00:00.000000' AND TIMESTAMP '2026-03-05 00:00:00.000000' OR ts BETWEEN TIMESTAMP '2026-03-06 00:00:00.000000' AND TIMESTAMP '2026-03-06 00:00:00.000000')", result);
+  }
+
+  [Fact]
   public void RewriteTickIntervals_IsoLiterals_RewritesToBetween()
   {
     var sql = "SELECT * FROM logs WHERE ts IN '2025-01-10T09:00:00..2025-01-10T17:00:00'";

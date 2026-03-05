@@ -358,7 +358,8 @@ Write-Host ""
 while ($true) {
     $promptSuffix = if ($isMultilineMode) { "|ml" } else { "" }
     $prompt = "lumina[$mode|debug=$debugEnabled$promptSuffix]> "
-    $inputLine = Read-Host -Prompt $prompt
+    Write-Host -NoNewline $prompt
+    $inputLine = [Console]::ReadLine()
 
     if ($null -eq $inputLine) {
         continue

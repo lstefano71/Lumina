@@ -320,11 +320,14 @@ public static class SqlValidator
     return AllowedReadFunctions.Contains(functionName);
   }
 
-  // Matches: <identifier> IN '<tick expression>' where the tick expression contains
-  // range operators (..), duration separators (;), or $ variables that indicate
-  // a TICK interval rather than a normal SQL IN ('value') literal.
+    // Matches: <identifier> IN '<tick expression candidate>'
+    //
+    // We intentionally match any single-quoted IN literal and then delegate to
+    // TickExpressionParser. If parsing fails, the expression is left untouched.
+    // This enables bracket-only forms (e.g. 2026-03-[05,06]) and other QuestDB
+    // TICK variants that do not include $, .., or ; tokens.
   private static readonly Regex TickInPattern = new(
-      @"(?<col>[A-Za-z_][A-Za-z0-9_.]*|""[^""]+"")\s+[Ii][Nn]\s+'(?<tick>[^']*(?:\$|\.\.|;)[^']*)'",
+      @"(?<col>[A-Za-z_][A-Za-z0-9_.]*|""[^""]+"")\s+[Ii][Nn]\s+'(?<tick>[^']+)'",
       RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
   /// <summary>
