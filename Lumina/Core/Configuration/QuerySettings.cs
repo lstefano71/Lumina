@@ -58,6 +58,15 @@ public sealed class QuerySettings
   public int LiveRefreshIntervalSeconds { get; init; } = 1;
 
   /// <summary>
+  /// Gets a value indicating whether tick interval rewrites should use
+  /// epoch-based comparisons for correctness-first behavior.
+  /// When enabled, rewrites emit predicates like:
+  /// <c>epoch_us(_t) BETWEEN epoch_us(TIMESTAMP '...') AND epoch_us(TIMESTAMP '...')</c>.
+  /// Default is false.
+  /// </summary>
+  public bool UseEpochTickRewrite { get; init; } = false;
+
+  /// <summary>
   /// Gets the refresh interval as a TimeSpan.
   /// </summary>
   public TimeSpan RefreshInterval => TimeSpan.FromSeconds(RefreshStreamsIntervalSeconds);

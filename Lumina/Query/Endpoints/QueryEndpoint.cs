@@ -72,6 +72,7 @@ public static class QueryEndpoint
   /// </summary>
   private static async Task<IResult> ExecuteSqlGetAsync(
       [FromQuery(Name = "q")] string q,
+      [FromQuery] bool debug,
       [FromServices] DuckDbQueryService queryService,
       [FromServices] QuerySettings settings,
       CancellationToken cancellationToken)
@@ -80,7 +81,7 @@ public static class QueryEndpoint
       return Results.BadRequest("SQL query (q) is required");
     }
 
-    return await ExecuteQueryInternalAsync(q, null, queryService, settings, cancellationToken);
+    return await ExecuteQueryInternalAsync(q, null, debug, queryService, settings, cancellationToken);
   }
 
   /// <summary>
@@ -88,6 +89,7 @@ public static class QueryEndpoint
   /// </summary>
   private static async Task<IResult> ExecuteSqlPostAsync(
       HttpContext context,
+      [FromQuery] bool debug,
       [FromServices] DuckDbQueryService queryService,
       [FromServices] QuerySettings settings,
       CancellationToken cancellationToken)
@@ -99,7 +101,7 @@ public static class QueryEndpoint
       return Results.BadRequest("SQL query body is required");
     }
 
-    return await ExecuteQueryInternalAsync(sql, null, queryService, settings, cancellationToken);
+    return await ExecuteQueryInternalAsync(sql, null, debug, queryService, settings, cancellationToken);
   }
 
   /// <summary>
@@ -107,6 +109,7 @@ public static class QueryEndpoint
   /// </summary>
   private static async Task<IResult> ExecuteSqlParameterizedAsync(
       [FromBody] SqlParameterizedRequest request,
+      [FromQuery] bool debug,
       [FromServices] DuckDbQueryService queryService,
       [FromServices] QuerySettings settings,
       CancellationToken cancellationToken)
@@ -115,7 +118,7 @@ public static class QueryEndpoint
       return Results.BadRequest("SQL query is required");
     }
 
-    return await ExecuteQueryInternalAsync(request.Sql, request.Parameters, queryService, settings, cancellationToken);
+    return await ExecuteQueryInternalAsync(request.Sql, request.Parameters, debug, queryService, settings, cancellationToken);
   }
 
   /// <summary>
@@ -124,17 +127,20 @@ public static class QueryEndpoint
   private static async Task<IResult> ExecuteQueryInternalAsync(
       string sql,
       Dictionary<string, object?>? parameters,
+      bool debug,
       DuckDbQueryService queryService,
       QuerySettings settings,
       CancellationToken cancellationToken)
   {
+    var originalSql = sql;
+
     // Rewrite single-quoted stream names (e.g. FROM 'my-stream') to properly
     // double-quoted SQL identifiers before validation and execution.
     sql = SqlValidator.RewriteSingleQuotedIdentifiers(sql);
 
     // Rewrite QuestDB-style TICK interval expressions (e.g. ts IN '$now - 5m..$now')
     // into standard SQL BETWEEN clauses so DuckDB can push filters to Parquet files.
-    sql = SqlValidator.RewriteTickIntervals(sql);
+    sql = SqlValidator.RewriteTickIntervals(sql, DateTimeOffset.UtcNow, settings.UseEpochTickRewrite);
 
     // Validate SQL if validation is enabled
     if (settings.EnableSqlValidation) {
@@ -158,9 +164,19 @@ public static class QueryEndpoint
         RowCount = result.RowCount,
         Columns = columns,
         ExecutionTimeMs = result.ExecutionTime.TotalMilliseconds,
-        RegisteredStreams = result.RegisteredStreams
+        RegisteredStreams = result.RegisteredStreams,
+        OriginalSql = debug ? originalSql : null,
+        RewrittenSql = debug ? sql : null
       });
     } catch (Exception ex) {
+      if (debug) {
+        return Results.BadRequest(new QueryErrorResponse {
+          Error = $"Query execution failed: {ex.Message}",
+          OriginalSql = originalSql,
+          RewrittenSql = sql
+        });
+      }
+
       return Results.BadRequest($"Query execution failed: {ex.Message}");
     }
   }
@@ -360,6 +376,39 @@ public sealed class QueryResponse
   /// Gets the available streams that were registered as tables for this query.
   /// </summary>
   public IReadOnlyList<string> RegisteredStreams { get; init; } = Array.Empty<string>();
+
+  /// <summary>
+  /// Gets the original SQL received by the endpoint when debug mode is enabled.
+  /// </summary>
+  public string? OriginalSql { get; init; }
+
+  /// <summary>
+  /// Gets the SQL after internal rewrites (identifier and tick interval expansion)
+  /// when debug mode is enabled.
+  /// </summary>
+  public string? RewrittenSql { get; init; }
+}
+
+/// <summary>
+/// Error response for SQL query execution failures.
+/// Includes rewritten SQL metadata in debug mode.
+/// </summary>
+public sealed class QueryErrorResponse
+{
+  /// <summary>
+  /// Gets the error message.
+  /// </summary>
+  public required string Error { get; init; }
+
+  /// <summary>
+  /// Gets the original SQL received by the endpoint.
+  /// </summary>
+  public string? OriginalSql { get; init; }
+
+  /// <summary>
+  /// Gets the SQL after internal rewrites.
+  /// </summary>
+  public string? RewrittenSql { get; init; }
 }
 
 /// <summary>

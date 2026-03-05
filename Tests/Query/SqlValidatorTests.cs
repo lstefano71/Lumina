@@ -338,7 +338,7 @@ public class SqlValidatorTests
     var sql = "SELECT * FROM logs WHERE ts IN '$now - 5m..$now'";
     var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
 
-    Assert.Contains("ts BETWEEN '2025-06-15 11:55:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+    Assert.Contains("ts BETWEEN TIMESTAMP '2025-06-15 11:55:00.000000' AND TIMESTAMP '2025-06-15 12:00:00.000000'", result);
     Assert.DoesNotContain("$now", result);
   }
 
@@ -348,7 +348,16 @@ public class SqlValidatorTests
     var sql = "SELECT * FROM logs WHERE ts IN '$now - 1h;30m'";
     var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
 
-    Assert.Contains("ts BETWEEN '2025-06-15 11:00:00.000000' AND '2025-06-15 11:30:00.000000'", result);
+    Assert.Contains("ts BETWEEN TIMESTAMP '2025-06-15 11:00:00.000000' AND TIMESTAMP '2025-06-15 11:30:00.000000'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_IsoDateDuration_RewritesToBetween()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '2026-03-05;24h'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
+
+    Assert.Contains("ts BETWEEN TIMESTAMP '2026-03-05 00:00:00.000000' AND TIMESTAMP '2026-03-06 00:00:00.000000'", result);
   }
 
   [Fact]
@@ -357,7 +366,7 @@ public class SqlValidatorTests
     var sql = "SELECT * FROM logs WHERE ts IN '2025-01-10T09:00:00..2025-01-10T17:00:00'";
     var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
 
-    Assert.Contains("ts BETWEEN '2025-01-10 09:00:00.000000' AND '2025-01-10 17:00:00.000000'", result);
+    Assert.Contains("ts BETWEEN TIMESTAMP '2025-01-10 09:00:00.000000' AND TIMESTAMP '2025-01-10 17:00:00.000000'", result);
   }
 
   [Fact]
@@ -366,7 +375,7 @@ public class SqlValidatorTests
     var sql = "SELECT * FROM logs WHERE \"Timestamp\" IN '$now - 10m..$now'";
     var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
 
-    Assert.Contains("\"Timestamp\" BETWEEN '2025-06-15 11:50:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+    Assert.Contains("\"Timestamp\" BETWEEN TIMESTAMP '2025-06-15 11:50:00.000000' AND TIMESTAMP '2025-06-15 12:00:00.000000'", result);
   }
 
   [Fact]
@@ -375,7 +384,7 @@ public class SqlValidatorTests
     var sql = "SELECT * FROM logs WHERE ts IN '$TODAY..$NOW'";
     var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
 
-    Assert.Contains("ts BETWEEN '2025-06-15 00:00:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+    Assert.Contains("ts BETWEEN TIMESTAMP '2025-06-15 00:00:00.000000' AND TIMESTAMP '2025-06-15 12:00:00.000000'", result);
   }
 
   [Fact]
@@ -403,8 +412,8 @@ public class SqlValidatorTests
     var sql = "SELECT * FROM logs WHERE ts IN '$now - 1h..$now' AND created IN '$today..$now'";
     var result = SqlValidator.RewriteTickIntervals(sql, FixedNow);
 
-    Assert.Contains("ts BETWEEN '2025-06-15 11:00:00.000000' AND '2025-06-15 12:00:00.000000'", result);
-    Assert.Contains("created BETWEEN '2025-06-15 00:00:00.000000' AND '2025-06-15 12:00:00.000000'", result);
+    Assert.Contains("ts BETWEEN TIMESTAMP '2025-06-15 11:00:00.000000' AND TIMESTAMP '2025-06-15 12:00:00.000000'", result);
+    Assert.Contains("created BETWEEN TIMESTAMP '2025-06-15 00:00:00.000000' AND TIMESTAMP '2025-06-15 12:00:00.000000'", result);
   }
 
   [Fact]
@@ -416,5 +425,14 @@ public class SqlValidatorTests
 
     Assert.Contains("ts BETWEEN", result);
     Assert.Contains("level = 'error'", result);
+  }
+
+  [Fact]
+  public void RewriteTickIntervals_UseEpochRewrite_EmitsEpochPredicate()
+  {
+    var sql = "SELECT * FROM logs WHERE ts IN '$now - 5m..$now'";
+    var result = SqlValidator.RewriteTickIntervals(sql, FixedNow, useEpochRewrite: true);
+
+    Assert.Contains("(epoch_us(try_cast(ts AS TIMESTAMP_NS)) >= epoch_us(CAST('2025-06-15 11:55:00.000000' AS TIMESTAMP_NS)) AND epoch_us(try_cast(ts AS TIMESTAMP_NS)) < epoch_us(CAST('2025-06-15 12:00:00.000000' AS TIMESTAMP_NS)))", result);
   }
 }

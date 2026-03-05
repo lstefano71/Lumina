@@ -324,7 +324,7 @@ public static class SqlValidator
   // range operators (..), duration separators (;), or $ variables that indicate
   // a TICK interval rather than a normal SQL IN ('value') literal.
   private static readonly Regex TickInPattern = new(
-      @"(?<col>[A-Za-z_][A-Za-z0-9_.]*|""[^""]+"")\s+[Ii][Nn]\s+'(?<tick>[^']*(?:\$|\.\.)[^']*)'",
+      @"(?<col>[A-Za-z_][A-Za-z0-9_.]*|""[^""]+"")\s+[Ii][Nn]\s+'(?<tick>[^']*(?:\$|\.\.|;)[^']*)'",
       RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
   /// <summary>
@@ -337,12 +337,20 @@ public static class SqlValidator
   /// <para>Expressions that fail to parse are left untouched.</para>
   /// </summary>
   public static string RewriteTickIntervals(string sql)
-    => RewriteTickIntervals(sql, DateTimeOffset.UtcNow);
+    => RewriteTickIntervals(sql, DateTimeOffset.UtcNow, useEpochRewrite: false);
 
   /// <summary>
   /// Overload that accepts an explicit <paramref name="now"/> for deterministic testing.
   /// </summary>
   public static string RewriteTickIntervals(string sql, DateTimeOffset now)
+    => RewriteTickIntervals(sql, now, useEpochRewrite: false);
+
+  /// <summary>
+  /// Overload that accepts an explicit <paramref name="now"/> and rewrite strategy.
+  /// When <paramref name="useEpochRewrite"/> is true, emitted predicates use
+  /// <c>epoch_us(...)</c> comparison for correctness-first behavior.
+  /// </summary>
+  public static string RewriteTickIntervals(string sql, DateTimeOffset now, bool useEpochRewrite)
   {
     if (string.IsNullOrWhiteSpace(sql))
       return sql;
@@ -358,7 +366,10 @@ public static class SqlValidator
       if (intervals.Count == 1) {
         var start = TickExpressionParser.FormatTimestamp(intervals[0].Start);
         var end = TickExpressionParser.FormatTimestamp(intervals[0].End);
-        return $"{col} BETWEEN '{start}' AND '{end}'";
+        if (useEpochRewrite)
+          return $"(epoch_us(try_cast({col} AS TIMESTAMP_NS)) >= epoch_us(CAST('{start}' AS TIMESTAMP_NS)) AND epoch_us(try_cast({col} AS TIMESTAMP_NS)) < epoch_us(CAST('{end}' AS TIMESTAMP_NS)))";
+
+        return $"{col} BETWEEN TIMESTAMP '{start}' AND TIMESTAMP '{end}'";
       }
 
       // Multiple intervals → parenthesised OR chain
@@ -368,7 +379,10 @@ public static class SqlValidator
         if (i > 0) parts.Append(" OR ");
         var s = TickExpressionParser.FormatTimestamp(intervals[i].Start);
         var e = TickExpressionParser.FormatTimestamp(intervals[i].End);
-        parts.Append($"{col} BETWEEN '{s}' AND '{e}'");
+        if (useEpochRewrite)
+          parts.Append($"(epoch_us(try_cast({col} AS TIMESTAMP_NS)) >= epoch_us(CAST('{s}' AS TIMESTAMP_NS)) AND epoch_us(try_cast({col} AS TIMESTAMP_NS)) < epoch_us(CAST('{e}' AS TIMESTAMP_NS)))");
+        else
+          parts.Append($"{col} BETWEEN TIMESTAMP '{s}' AND TIMESTAMP '{e}'");
       }
       parts.Append(')');
       return parts.ToString();
