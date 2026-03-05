@@ -113,31 +113,30 @@ function Get-ResponseValue {
 
 function Write-ReplHelp {
     Write-Host "Lumina SQL REPL commands:" -ForegroundColor Cyan
-    Write-Host "  :help                         Show this help"
-    Write-Host "  :status                       Show current REPL settings"
-    Write-Host "  :base <url>                   Set base URL"
-    Write-Host "  :mode <sql-post|sql-get|sql-parameterized>"
+    Write-Host "  .help                         Show this help"
+    Write-Host "  .status                       Show current REPL settings"
+    Write-Host "  .base <url>                   Set base URL"
+    Write-Host "  .mode <sql-post|sql-get|sql-parameterized>"
     Write-Host "                               Set endpoint mode"
-    Write-Host "  :debug <on|off>               Toggle debug query flag"
-    Write-Host "  :rows <n>                     Set preview row count"
-    Write-Host "  :meta <on|off>                Toggle metadata output"
-    Write-Host "  :raw <on|off>                 Toggle raw JSON output"
-    Write-Host "  :sql <query>                  Execute a single-line SQL query"
-    Write-Host "  :begin                        Enter multiline SQL mode"
-    Write-Host "  :end                          Execute multiline SQL and exit multiline mode"
-    Write-Host "  :abort                        Exit multiline SQL mode without executing"
-    Write-Host "  :clear                        Clear buffered SQL text"
-    Write-Host "  :run                          Execute buffered SQL text"
-    Write-Host "  :param set <name> <jsonValue> Set parameter (parameterized mode)"
-    Write-Host "  :param remove <name>          Remove parameter"
-    Write-Host "  :param clear                  Clear all parameters"
-    Write-Host "  :param list                   Show current parameters"
-    Write-Host "  :quit                         Exit REPL"
+    Write-Host "  .debug <on|off>               Toggle debug query flag"
+    Write-Host "  .rows <n>                     Set preview row count"
+    Write-Host "  .meta <on|off>                Toggle metadata output"
+    Write-Host "  .raw <on|off>                 Toggle raw JSON output"
+    Write-Host "  .sql <query>                  Execute a single-line SQL query"
+    Write-Host "  .begin                        Enter multiline SQL mode"
+    Write-Host "  .end                          Execute multiline SQL and exit multiline mode"
+    Write-Host "  .abort                        Exit multiline SQL mode without executing"
+    Write-Host "  .clear                        Clear buffered SQL text"
+    Write-Host "  .param set <name> <jsonValue> Set parameter (parameterized mode)"
+    Write-Host "  .param remove <name>          Remove parameter"
+    Write-Host "  .param clear                  Clear all parameters"
+    Write-Host "  .param list                   Show current parameters"
+    Write-Host "  .quit                         Exit REPL"
     Write-Host ""
     Write-Host "Usage:" -ForegroundColor DarkCyan
     Write-Host "  - Type SQL directly to execute immediately"
-    Write-Host "  - Use :begin to start multiline input, then :end to execute"
-    Write-Host "  - You can still execute immediately with :sql SELECT * FROM 'test-stream' LIMIT 10"
+    Write-Host "  - Use .begin to start multiline input, then .end to execute"
+    Write-Host "  - You can still execute immediately with .sql SELECT * FROM 'test-stream' LIMIT 10"
 }
 
 function Write-ReplStatus {
@@ -352,7 +351,7 @@ $paramsMap = @{}
 $sqlBuffer = New-Object System.Collections.Generic.List[string]
 
 Write-Host "Lumina SQL REPL" -ForegroundColor Green
-Write-Host "Type :help for commands. SQL executes immediately; use :begin for multiline." -ForegroundColor Gray
+Write-Host "Type .help for commands. SQL executes immediately; use .begin for multiline." -ForegroundColor Gray
 Write-ReplStatus -CurrentBaseUrl $baseUrl -CurrentMode $mode -CurrentDebug $debugEnabled -CurrentRows $rowsToShow -CurrentMeta $showMeta -CurrentRaw $showRaw -IsMultilineMode $isMultilineMode -CurrentParams $paramsMap -CurrentBuffer $sqlBuffer
 Write-Host ""
 
@@ -370,39 +369,39 @@ while ($true) {
         continue
     }
 
-    if ($line.StartsWith(':')) {
+    if ($line.StartsWith('.')) {
         $parts = @($line -split '\s+')
         $command = $parts[0].ToLowerInvariant()
 
-        if ($command -eq ':quit' -or $command -eq ':exit') {
+        if ($command -eq '.quit' -or $command -eq '.exit') {
             break
         }
 
-        if ($command -eq ':help') {
+        if ($command -eq '.help') {
             Write-ReplHelp
             continue
         }
 
-        if ($command -eq ':status') {
+        if ($command -eq '.status') {
             Write-ReplStatus -CurrentBaseUrl $baseUrl -CurrentMode $mode -CurrentDebug $debugEnabled -CurrentRows $rowsToShow -CurrentMeta $showMeta -CurrentRaw $showRaw -IsMultilineMode $isMultilineMode -CurrentParams $paramsMap -CurrentBuffer $sqlBuffer
             continue
         }
 
-        if ($command -eq ':begin') {
+        if ($command -eq '.begin') {
             if ($isMultilineMode) {
-                Write-Host "Already in multiline mode. Enter SQL lines, then use :end or :abort." -ForegroundColor Yellow
+                Write-Host "Already in multiline mode. Enter SQL lines, then use .end or .abort." -ForegroundColor Yellow
                 continue
             }
 
             $sqlBuffer.Clear()
             $isMultilineMode = $true
-            Write-Host "Multiline mode enabled. Enter SQL lines, then use :end to execute or :abort to cancel." -ForegroundColor Green
+            Write-Host "Multiline mode enabled. Enter SQL lines, then use .end to execute or .abort to cancel." -ForegroundColor Green
             continue
         }
 
-        if ($command -eq ':end') {
+        if ($command -eq '.end') {
             if (-not $isMultilineMode) {
-                Write-Host "Not in multiline mode. Use :begin first." -ForegroundColor Yellow
+                Write-Host "Not in multiline mode. Use .begin first." -ForegroundColor Yellow
                 continue
             }
 
@@ -430,7 +429,7 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':abort') {
+        if ($command -eq '.abort') {
             if (-not $isMultilineMode) {
                 Write-Host "Not in multiline mode." -ForegroundColor Yellow
                 continue
@@ -442,9 +441,9 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':base') {
+        if ($command -eq '.base') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :base <url>" -ForegroundColor Yellow
+                Write-Host "Usage: .base <url>" -ForegroundColor Yellow
                 continue
             }
 
@@ -459,9 +458,9 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':mode') {
+        if ($command -eq '.mode') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :mode <sql-post|sql-get|sql-parameterized>" -ForegroundColor Yellow
+                Write-Host "Usage: .mode <sql-post|sql-get|sql-parameterized>" -ForegroundColor Yellow
                 continue
             }
 
@@ -476,9 +475,9 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':debug') {
+        if ($command -eq '.debug') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :debug <on|off>" -ForegroundColor Yellow
+                Write-Host "Usage: .debug <on|off>" -ForegroundColor Yellow
                 continue
             }
 
@@ -496,9 +495,9 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':rows') {
+        if ($command -eq '.rows') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :rows <n>" -ForegroundColor Yellow
+                Write-Host "Usage: .rows <n>" -ForegroundColor Yellow
                 continue
             }
 
@@ -513,9 +512,9 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':meta') {
+        if ($command -eq '.meta') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :meta <on|off>" -ForegroundColor Yellow
+                Write-Host "Usage: .meta <on|off>" -ForegroundColor Yellow
                 continue
             }
 
@@ -533,9 +532,9 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':raw') {
+        if ($command -eq '.raw') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :raw <on|off>" -ForegroundColor Yellow
+                Write-Host "Usage: .raw <on|off>" -ForegroundColor Yellow
                 continue
             }
 
@@ -553,15 +552,15 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':clear') {
+        if ($command -eq '.clear') {
             $sqlBuffer.Clear()
             Write-Host "SQL buffer cleared." -ForegroundColor Green
             continue
         }
 
-        if ($command -eq ':param') {
+        if ($command -eq '.param') {
             if ($parts.Count -lt 2) {
-                Write-Host "Usage: :param <set|remove|clear|list> ..." -ForegroundColor Yellow
+                Write-Host "Usage: .param <set|remove|clear|list> ..." -ForegroundColor Yellow
                 continue
             }
 
@@ -587,7 +586,7 @@ while ($true) {
 
             if ($sub -eq 'remove') {
                 if ($parts.Count -lt 3) {
-                    Write-Host "Usage: :param remove <name>" -ForegroundColor Yellow
+                    Write-Host "Usage: .param remove <name>" -ForegroundColor Yellow
                     continue
                 }
 
@@ -604,12 +603,12 @@ while ($true) {
 
             if ($sub -eq 'set') {
                 if ($parts.Count -lt 4) {
-                    Write-Host "Usage: :param set <name> <jsonValue>" -ForegroundColor Yellow
+                    Write-Host "Usage: .param set <name> <jsonValue>" -ForegroundColor Yellow
                     continue
                 }
 
                 $name = $parts[2]
-                $prefix = ":param set $name"
+                $prefix = ".param set $name"
                 $rawJsonValue = $line.Substring($prefix.Length).Trim()
 
                 if ([string]::IsNullOrWhiteSpace($name)) {
@@ -629,13 +628,13 @@ while ($true) {
                 continue
             }
 
-            Write-Host "Unknown :param subcommand '$sub'." -ForegroundColor Red
+            Write-Host "Unknown .param subcommand '$sub'." -ForegroundColor Red
             continue
         }
 
-        if ($command -eq ':sql') {
+        if ($command -eq '.sql') {
             if ($line.Length -le 4) {
-                Write-Host "Usage: :sql <query>" -ForegroundColor Yellow
+                Write-Host "Usage: .sql <query>" -ForegroundColor Yellow
                 continue
             }
 
@@ -655,34 +654,7 @@ while ($true) {
             continue
         }
 
-        if ($command -eq ':run') {
-            if ($sqlBuffer.Count -eq 0) {
-                Write-Host "SQL buffer is empty. Add SQL lines first or use :sql <query>." -ForegroundColor Yellow
-                continue
-            }
-
-            $sqlText = ($sqlBuffer -join [Environment]::NewLine).Trim()
-            if ([string]::IsNullOrWhiteSpace($sqlText)) {
-                Write-Host "SQL buffer is empty." -ForegroundColor Yellow
-                continue
-            }
-
-            try {
-                $response = Invoke-LuminaSqlQuery -CurrentBaseUrl $baseUrl -CurrentMode $mode -CurrentDebug $debugEnabled -Sql $sqlText -CurrentParams $paramsMap
-                Write-QuerySuccess -Response $response -PreviewRows $rowsToShow -ShowMeta $showMeta -ShowRaw $showRaw
-            } catch {
-                Write-QueryError -ErrorRecord $_
-            } finally {
-                if ($isMultilineMode) {
-                    $sqlBuffer.Clear()
-                    $isMultilineMode = $false
-                }
-            }
-
-            continue
-        }
-
-        Write-Host "Unknown command: $command. Type :help." -ForegroundColor Yellow
+        Write-Host "Unknown command: $command. Type .help." -ForegroundColor Yellow
         continue
     }
 
