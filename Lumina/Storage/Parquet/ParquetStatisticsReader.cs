@@ -79,4 +79,23 @@ public static class ParquetStatisticsReader
       return 0;
     }
   }
+
+  /// <summary>
+  /// Reads file-level custom metadata from a Parquet file.
+  /// </summary>
+  /// <param name="filePath">Path to the Parquet file.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  /// <returns>Custom metadata dictionary, or an empty dictionary if unavailable.</returns>
+  public static async Task<IReadOnlyDictionary<string, string>> ReadCustomMetadataAsync(
+      string filePath,
+      CancellationToken cancellationToken = default)
+  {
+    try {
+      await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+      using var reader = await global::Parquet.ParquetReader.CreateAsync(stream, cancellationToken: cancellationToken);
+      return reader.CustomMetadata ?? new Dictionary<string, string>();
+    } catch {
+      return new Dictionary<string, string>();
+    }
+  }
 }

@@ -151,6 +151,163 @@ public static class ParquetWriter
   }
 
   /// <summary>
+  /// Writes log entries from an async source of chunks, one Parquet row group per chunk.
+  /// Only one chunk is held in memory at a time, bounding memory usage.
+  /// </summary>
+  /// <param name="chunks">Async enumerable of entry batches; each batch becomes one row group.</param>
+  /// <param name="outputPath">The output file path.</param>
+  /// <param name="maxDynamicKeys">Maximum dynamic keys before overflow.</param>
+  /// <param name="cancellationToken">Cancellation token.</param>
+  /// <returns>Total number of entries written.</returns>
+  public static async Task<int> WriteChunkedAsync(
+      IAsyncEnumerable<IReadOnlyList<LogEntry>> chunks,
+      string outputPath,
+      int maxDynamicKeys = 100,
+      IReadOnlyDictionary<string, string>? fileMetadata = null,
+      CancellationToken cancellationToken = default)
+  {
+    var directory = Path.GetDirectoryName(outputPath);
+    if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory)) {
+      Directory.CreateDirectory(directory);
+    }
+
+    await using var fileStream = new FileStream(
+        outputPath,
+        FileMode.Create,
+        FileAccess.Write,
+        FileShare.None,
+        bufferSize: 65536,
+        options: FileOptions.Asynchronous);
+
+    var parquetOptions = new global::Parquet.ParquetOptions {
+      UseDictionaryEncoding = true,
+      DictionaryEncodingThreshold = 0.8,
+      UseDeltaBinaryPackedEncoding = true
+    };
+
+    global::Parquet.ParquetWriter? writer = null;
+    ParquetSchema? masterParquetSchema = null;
+    List<DataField>? masterFields = null;
+    IReadOnlyList<ColumnSchema>? masterSchema = null;
+    IReadOnlySet<string>? masterSchemaNames = null;
+    var totalRows = 0;
+
+    try {
+      await foreach (var chunk in chunks.WithCancellation(cancellationToken)) {
+        if (chunk.Count == 0) continue;
+
+        List<DataColumn> columns;
+
+        if (writer == null) {
+          // First chunk: establish master schema
+          masterSchema = SchemaResolver.ResolveSchema(chunk, maxDynamicKeys);
+          var overflowKeys = SchemaResolver.GetOverflowKeys(
+              chunk,
+              masterSchema.Where(c => !c.IsOverflow).Select(c => c.Name).ToHashSet(),
+              maxDynamicKeys);
+
+          var fieldDataPairs = CollectFieldDataPairs(chunk, masterSchema, overflowKeys);
+          masterFields = fieldDataPairs.Select(p => p.Field).ToList();
+          masterParquetSchema = new ParquetSchema(masterFields);
+          masterSchemaNames = masterFields.Select(f => f.Name).ToHashSet();
+          columns = fieldDataPairs.Select(p => new DataColumn(p.Field, p.Data)).ToList();
+
+          writer = await global::Parquet.ParquetWriter.CreateAsync(
+              masterParquetSchema, fileStream, parquetOptions, append: false, cancellationToken);
+          writer.CompressionMethod = global::Parquet.CompressionMethod.Zstd;
+          writer.CompressionLevel = CompressionLevel.Optimal;
+          if (fileMetadata != null)
+            writer.CustomMetadata = new Dictionary<string, string>(fileMetadata);
+        } else {
+          // Subsequent chunks: align columns to master schema order
+          var chunkSchema = SchemaResolver.ResolveSchema(chunk, maxDynamicKeys);
+          var chunkPromotedNames = chunkSchema
+              .Where(c => !c.IsOverflow)
+              .Select(c => c.Name)
+              .ToHashSet();
+
+          // Keys present in this chunk but NOT in master schema → overflow to _meta
+          var extraOverflowKeys = chunkPromotedNames
+              .Where(k => !masterSchemaNames!.Contains(k) && !IsFixedColumn(k))
+              .ToHashSet();
+
+          var baseOverflowKeys = SchemaResolver.GetOverflowKeys(
+              chunk,
+              chunkPromotedNames,
+              maxDynamicKeys);
+
+          // Merge extra overflow keys with computed overflow
+          var combinedOverflowKeys = new HashSet<string>(baseOverflowKeys);
+          combinedOverflowKeys.UnionWith(extraOverflowKeys);
+
+          // Build a lookup of chunk field data pairs by name
+          var chunkPairs = CollectFieldDataPairs(chunk, chunkSchema, combinedOverflowKeys);
+          var chunkPairMap = new Dictionary<string, (DataField Field, Array Data)>();
+          foreach (var pair in chunkPairs) {
+            chunkPairMap[pair.Field.Name] = pair;
+          }
+
+          // Emit columns in master schema order
+          columns = new List<DataColumn>(masterFields!.Count);
+          foreach (var masterField in masterFields) {
+            if (chunkPairMap.TryGetValue(masterField.Name, out var pair)) {
+              // Use master field definition to keep schema consistent
+              columns.Add(new DataColumn(masterField, pair.Data));
+            } else {
+              // Column missing in this chunk → null-fill
+              columns.Add(CreateNullColumn(masterField, chunk.Count));
+            }
+          }
+        }
+
+        using var rowGroup = writer.CreateRowGroup();
+        foreach (var column in columns) {
+          cancellationToken.ThrowIfCancellationRequested();
+          await rowGroup.WriteColumnAsync(column);
+        }
+
+        totalRows += chunk.Count;
+      }
+    } finally {
+      if (writer != null) {
+        await writer.DisposeAsync();
+      }
+    }
+
+    return totalRows;
+  }
+
+  /// <summary>
+  /// Creates a null-filled DataColumn for a field, used when a chunk lacks
+  /// a column present in the master schema.
+  /// </summary>
+  private static DataColumn CreateNullColumn(DataField field, int rowCount)
+  {
+    if (field.ClrType == typeof(string))
+      return new DataColumn(field, new string?[rowCount]);
+    if (field.ClrType == typeof(bool?))
+      return new DataColumn(field, new bool?[rowCount]);
+    if (field.ClrType == typeof(int?))
+      return new DataColumn(field, new int?[rowCount]);
+    if (field.ClrType == typeof(long?))
+      return new DataColumn(field, new long?[rowCount]);
+    if (field.ClrType == typeof(float?))
+      return new DataColumn(field, new float?[rowCount]);
+    if (field.ClrType == typeof(double?))
+      return new DataColumn(field, new double?[rowCount]);
+    if (field.ClrType == typeof(DateTime) || field.ClrType == typeof(DateTime?))
+      return new DataColumn(field, new DateTime?[rowCount]);
+    if (field.ClrType == typeof(byte[]))
+      return new DataColumn(field, new byte[]?[rowCount]);
+
+    // Fallback: treat as nullable string
+    return new DataColumn(field, new string?[rowCount]);
+  }
+
+  private static bool IsFixedColumn(string name) =>
+      name is "_s" or "_t" or "_l" or "_m" or "_traceid" or "_spanid" or "_duration_ms" or "_meta";
+
+  /// <summary>
   /// Generates an idempotent Parquet file name.
   /// </summary>
   /// <param name="stream">The stream name.</param>

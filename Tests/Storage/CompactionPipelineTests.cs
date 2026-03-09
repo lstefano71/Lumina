@@ -498,6 +498,174 @@ public sealed class CompactionPipelineTests : IDisposable
   }
 
   // -----------------------------------------------------------------------
+  //  Parquet file metadata stamping
+  // -----------------------------------------------------------------------
+
+  [Fact]
+  public async Task DailyCompaction_ShouldEmbedCompactionTierInOutputFileMetadata()
+  {
+    var stream = "meta-daily";
+    var yesterday = DateTime.UtcNow.Date.AddDays(-1).AddHours(10);
+
+    await WriteL1ParquetAsync(stream, yesterday, 5);
+    await WriteL1ParquetAsync(stream, yesterday.AddHours(1), 5);
+
+    var pipeline = CreatePipeline(new DailyCompactionTier());
+    var result = await pipeline.CompactAllAsync();
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
+
+    var l2Entry = _catalogManager.GetEntries(stream, StorageLevel.L2).Should().ContainSingle().Subject;
+
+    var meta = await ParquetStatisticsReader.ReadCustomMetadataAsync(l2Entry.FilePath);
+    meta.Should().ContainKey("lumina.compaction_tier").WhoseValue.Should().Be("2");
+  }
+
+  [Fact]
+  public async Task MonthlyCompaction_ShouldEmbedCompactionTierInOutputFileMetadata()
+  {
+    var stream = "meta-monthly";
+    var streamDir = Path.Combine(_l2Directory, stream);
+    Directory.CreateDirectory(streamDir);
+
+    var baseDate = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    for (int day = 0; day < 3; day++) {
+      var entries = Enumerable.Range(0, 5).Select(i => new LogEntry {
+        Stream = stream,
+        Timestamp = baseDate.AddDays(day).AddSeconds(i),
+        Level = "info",
+        Message = $"d{day}-m{i}",
+        Attributes = new Dictionary<string, object?>()
+      }).ToList();
+
+      var path = Path.Combine(streamDir, $"{stream}_{baseDate.AddDays(day):yyyyMMdd}.parquet");
+      await ParquetWriter.WriteBatchAsync(entries, path, 100);
+
+      await _catalogManager.AddFileAsync(new CatalogEntry {
+        StreamName = stream,
+        MinTime = entries.Min(e => e.Timestamp),
+        MaxTime = entries.Max(e => e.Timestamp),
+        FilePath = path,
+        Level = StorageLevel.L2,
+        RowCount = entries.Count,
+        FileSizeBytes = new FileInfo(path).Length,
+        AddedAt = DateTime.UtcNow,
+        CompactionTier = 2
+      });
+    }
+
+    var pipeline = CreatePipeline(new MonthlyCompactionTier());
+    var result = await pipeline.CompactAllAsync();
+    foreach (var files in result.PendingDeletions.Values) pipeline.DeleteSourceFiles(files);
+
+    var l2Entry = _catalogManager.GetEntries(stream, StorageLevel.L2).Should().ContainSingle().Subject;
+
+    var meta = await ParquetStatisticsReader.ReadCustomMetadataAsync(l2Entry.FilePath);
+    meta.Should().ContainKey("lumina.compaction_tier").WhoseValue.Should().Be("3");
+  }
+
+  [Fact]
+  public async Task FullPipeline_ShouldEmbedCorrectTierAtEachStage()
+  {
+    // Three L1 files for the same calendar month → daily → monthly in one pass.
+    // Verifies that the final monthly file carries tier 3, not 2.
+    var stream = "meta-full";
+    var jan10 = new DateTime(2024, 1, 10, 8, 0, 0, DateTimeKind.Utc);
+    var jan20 = new DateTime(2024, 1, 20, 14, 0, 0, DateTimeKind.Utc);
+    var jan25 = new DateTime(2024, 1, 25, 20, 0, 0, DateTimeKind.Utc);
+
+    await WriteL1ParquetAsync(stream, jan10, 5);
+    await WriteL1ParquetAsync(stream, jan20, 5);
+    await WriteL1ParquetAsync(stream, jan25, 5);
+
+    var fullPipeline = CreateDefaultPipeline();
+    var result = await fullPipeline.CompactAllAsync();
+    foreach (var files in result.PendingDeletions.Values) fullPipeline.DeleteSourceFiles(files);
+
+    var final = _catalogManager.GetEntries(stream, StorageLevel.L2).Should().ContainSingle().Subject;
+    final.CompactionTier.Should().Be(3);
+
+    var meta = await ParquetStatisticsReader.ReadCustomMetadataAsync(final.FilePath);
+    meta.Should().ContainKey("lumina.compaction_tier").WhoseValue.Should().Be("3");
+  }
+
+  // -----------------------------------------------------------------------
+  //  Row group size boundedness
+  // -----------------------------------------------------------------------
+
+  /// <summary>
+  /// Verifies that <see cref="CompactionSettings.CompactionRowGroupSize"/> caps the number
+  /// of rows in each Parquet row group produced by compaction.
+  ///
+  /// Because each Parquet row group is written from exactly one buffer flush inside
+  /// <c>ReadSourceChunks</c>, the row group structure of the output file is a faithful
+  /// structural proxy for peak in-process memory: if every row group contains
+  /// ≤ <c>rowGroupSize</c> rows, the accumulation buffer never exceeded that bound.
+  ///
+  /// The chosen numbers deliberately straddle source-file boundaries
+  /// (10 files × 200 rows = 2 000 total, row group size = 300) so that
+  /// full row groups must draw from two consecutive source files.
+  /// </summary>
+  [Fact]
+  public async Task CompactAllAsync_OutputRowGroupsAreCapedByCompactionRowGroupSize()
+  {
+    const int filesCount = 10;
+    const int rowsPerFile = 200;
+    const int rowGroupSize = 300;   // straddles file boundaries: 300 / 200 = 1.5 files per group
+    const int totalRows = filesCount * rowsPerFile; // 2 000
+
+    var stream = "rg-bounded";
+    var yesterday = DateTime.UtcNow.Date.AddDays(-1);
+
+    for (int i = 0; i < filesCount; i++)
+      await WriteL1ParquetAsync(stream, yesterday.AddHours(i), rowsPerFile);
+
+    var settings = new CompactionSettings {
+      L1Directory = _l1Directory,
+      L2Directory = _l2Directory,
+      CatalogDirectory = _catalogDirectory,
+      MaxDynamicKeys = 100,
+      CompactionRowGroupSize = rowGroupSize
+    };
+
+    var pipeline = new CompactionPipeline(
+        settings,
+        _catalogManager,
+        [new DailyCompactionTier()],
+        NullLogger<CompactionPipeline>.Instance);
+
+    var result = await pipeline.CompactAllAsync();
+    foreach (var files in result.PendingDeletions.Values)
+      pipeline.DeleteSourceFiles(files);
+
+    var l2Entries = _catalogManager.GetEntries(stream, StorageLevel.L2);
+    l2Entries.Should().ContainSingle();
+    l2Entries[0].RowCount.Should().Be(totalRows);
+
+    // Open the Parquet file and verify row group structure.
+    // ceil(2000 / 300) = 7: six full groups of 300 and one remainder group of 200.
+    var expectedGroupCount = (int)Math.Ceiling((double)totalRows / rowGroupSize);
+
+    await using var fs = new FileStream(l2Entries[0].FilePath, FileMode.Open, FileAccess.Read);
+    using var parquetReader = await global::Parquet.ParquetReader.CreateAsync(fs);
+
+    parquetReader.RowGroupCount.Should().Be(expectedGroupCount,
+        because: $"2000 rows at {rowGroupSize} rows/group should produce {expectedGroupCount} groups");
+
+    for (int g = 0; g < parquetReader.RowGroupCount; g++) {
+      using var rg = parquetReader.OpenRowGroupReader(g);
+
+      var isLastGroup = g == parquetReader.RowGroupCount - 1;
+      long expectedRows = isLastGroup
+          ? totalRows - (long)(parquetReader.RowGroupCount - 1) * rowGroupSize
+          : rowGroupSize;
+
+      rg.RowCount.Should().Be(expectedRows,
+          because: $"row group {g} should hold exactly {expectedRows} rows");
+    }
+  }
+
+  // -----------------------------------------------------------------------
   //  CatalogManager.GetEligibleEntries — generic method
   // -----------------------------------------------------------------------
 

@@ -163,6 +163,11 @@ public sealed class CompactionPipeline
   /// Atomic commit order: write temp file → rename → update catalog.
   /// Source file deletion is <b>deferred</b> — the returned list must be
   /// deleted by the caller under a writer lock.
+  /// <para>
+  /// Memory is bounded: source files are read one at a time and each
+  /// file's entries are written as a separate Parquet row group, then
+  /// discarded before the next file is read.
+  /// </para>
   /// </summary>
   /// <returns>List of source file paths that should be deleted by the caller.</returns>
   private async Task<IReadOnlyList<string>> ConsolidateGroupAsync(
@@ -172,23 +177,7 @@ public sealed class CompactionPipeline
       IReadOnlyList<CatalogEntry> sourceEntries,
       CancellationToken cancellationToken)
   {
-    var logEntries = new List<LogEntry>();
     var sourceFiles = sourceEntries.Select(e => e.FilePath).ToList();
-
-    foreach (var file in sourceFiles) {
-      await foreach (var entry in ParquetReader.ReadEntriesAsync(file, cancellationToken)) {
-        logEntries.Add(entry);
-      }
-    }
-
-    if (logEntries.Count == 0) {
-      _logger.LogDebug("{Tier}: no entries to consolidate for {Stream}/{GroupKey}",
-          tier.Name, stream, groupKey);
-      return Array.Empty<string>();
-    }
-
-    var minTime = logEntries.Min(e => e.Timestamp);
-    var maxTime = logEntries.Max(e => e.Timestamp);
 
     var outputDir = Path.Combine(_settings.L2Directory, stream);
     Directory.CreateDirectory(outputDir);
@@ -196,8 +185,53 @@ public sealed class CompactionPipeline
     var outputPath = Path.GetFullPath(Path.Combine(outputDir, outputFileName));
     var tmpOutputPath = outputPath + ".tmp";
 
-    await ParquetWriter.WriteBatchAsync(
-        logEntries, tmpOutputPath, _settings.MaxDynamicKeys, cancellationToken);
+    var minTime = DateTime.MaxValue;
+    var maxTime = DateTime.MinValue;
+
+    async IAsyncEnumerable<IReadOnlyList<LogEntry>> ReadSourceChunks(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+      var rowGroupSize = _settings.CompactionRowGroupSize;
+      var buffer = new List<LogEntry>(rowGroupSize);
+
+      foreach (var file in sourceFiles) {
+        ct.ThrowIfCancellationRequested();
+
+        await foreach (var entry in ParquetReader.ReadEntriesAsync(file, ct)) {
+          if (entry.Timestamp < minTime) minTime = entry.Timestamp;
+          if (entry.Timestamp > maxTime) maxTime = entry.Timestamp;
+
+          buffer.Add(entry);
+
+          if (buffer.Count >= rowGroupSize) {
+            yield return buffer;
+            buffer = new List<LogEntry>(rowGroupSize);
+          }
+        }
+      }
+
+      if (buffer.Count > 0) {
+        yield return buffer;
+      }
+    }
+
+    var totalRows = await ParquetWriter.WriteChunkedAsync(
+        ReadSourceChunks(cancellationToken),
+        tmpOutputPath,
+        _settings.MaxDynamicKeys,
+        fileMetadata: new Dictionary<string, string> {
+          ["lumina.compaction_tier"] = tier.OutputCompactionTier.ToString()
+        },
+        cancellationToken);
+
+    if (totalRows == 0) {
+      _logger.LogDebug("{Tier}: no entries to consolidate for {Stream}/{GroupKey}",
+          tier.Name, stream, groupKey);
+      // Clean up empty temp file if it was created
+      if (File.Exists(tmpOutputPath)) File.Delete(tmpOutputPath);
+      return Array.Empty<string>();
+    }
+
     File.Move(tmpOutputPath, outputPath, overwrite: true);
 
     var fileInfo = new FileInfo(outputPath);
@@ -207,7 +241,7 @@ public sealed class CompactionPipeline
       MaxTime = maxTime,
       FilePath = outputPath,
       Level = StorageLevel.L2,
-      RowCount = logEntries.Count,
+      RowCount = totalRows,
       FileSizeBytes = fileInfo.Length,
       AddedAt = DateTime.UtcNow,
       CompactionTier = tier.OutputCompactionTier
@@ -217,7 +251,7 @@ public sealed class CompactionPipeline
 
     _logger.LogInformation(
         "{Tier} compaction: {Count} entries from {Files} files → {Output}",
-        tier.Name, logEntries.Count, sourceFiles.Count, outputFileName);
+        tier.Name, totalRows, sourceFiles.Count, outputFileName);
 
     // Deletion is deferred — return the list for the caller to handle.
     return sourceFiles;

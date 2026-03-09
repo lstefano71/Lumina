@@ -47,6 +47,8 @@ public sealed class CompactorService : BackgroundService
   {
     _logger.LogInformation("Compactor service starting...");
 
+    CleanupOrphanedTempFiles();
+
     // Wait for the application to be fully started
     await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
@@ -158,6 +160,27 @@ public sealed class CompactorService : BackgroundService
 
       await _queryService.ClearHotTableAsync(stream, cancellationToken);
       await _queryService.RebuildStreamViewAsync(stream, cancellationToken);
+    }
+  }
+
+  private void CleanupOrphanedTempFiles()
+  {
+    if (!Directory.Exists(_settings.L2Directory)) return;
+
+    try {
+      var tmpFiles = Directory.EnumerateFiles(
+          _settings.L2Directory, "*.tmp", SearchOption.AllDirectories);
+
+      foreach (var tmp in tmpFiles) {
+        try {
+          File.Delete(tmp);
+          _logger.LogWarning("Deleted orphaned temp file from previous crash: {File}", tmp);
+        } catch (Exception ex) {
+          _logger.LogWarning(ex, "Failed to delete orphaned temp file: {File}", tmp);
+        }
+      }
+    } catch (Exception ex) {
+      _logger.LogWarning(ex, "Error scanning for orphaned temp files in {Dir}", _settings.L2Directory);
     }
   }
 }

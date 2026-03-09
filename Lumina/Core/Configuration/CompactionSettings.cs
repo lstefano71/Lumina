@@ -107,4 +107,12 @@ public sealed class CompactionSettings
   /// Default is true.
   /// </summary>
   public bool EnableCatalogStartupGc { get; init; } = true;
+
+  /// <summary>
+  /// Gets the target number of rows per Parquet row group produced by compaction.
+  /// Rows are accumulated across source files until this threshold is reached,
+  /// keeping memory usage bounded while producing larger, more efficient row groups.
+  /// Default is 100,000.
+  /// </summary>
+  public int CompactionRowGroupSize { get; init; } = 100_000;
 }

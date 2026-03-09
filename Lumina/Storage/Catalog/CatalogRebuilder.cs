@@ -198,6 +198,14 @@ public sealed class CatalogRebuilder
     // Get row count from Parquet file
     long rowCount = await ParquetStatisticsReader.GetRowCountAsync(filePath, cancellationToken);
 
+    // Read compaction tier from file metadata; fall back to (int)level for files
+    // written before this metadata was introduced.
+    var fileMeta = await ParquetStatisticsReader.ReadCustomMetadataAsync(filePath, cancellationToken);
+    int compactionTier = fileMeta.TryGetValue("lumina.compaction_tier", out var tierStr)
+        && int.TryParse(tierStr, out var parsedTier)
+        ? parsedTier
+        : (int)level;
+
     return new CatalogEntry {
       StreamName = streamName,
       MinTime = minTime,
@@ -207,7 +215,7 @@ public sealed class CatalogRebuilder
       RowCount = rowCount,
       FileSizeBytes = fileInfo.Length,
       AddedAt = DateTime.UtcNow,
-      CompactionTier = (int)level
+      CompactionTier = compactionTier
     };
   }
 

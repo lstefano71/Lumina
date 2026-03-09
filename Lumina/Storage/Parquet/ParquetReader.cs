@@ -47,26 +47,69 @@ public static class ParquetReader
 
       var rowCount = columns.Values.First().Data.Length;
 
+      columns.TryGetValue("_s", out var streamColumn);
+      var streamData = streamColumn?.Data as string[];
+
+      columns.TryGetValue("_t", out var timestampColumn);
+      var timestampDateTimeData = timestampColumn?.Data as DateTime[];
+      var timestampDateTimeOffsetData = timestampColumn?.Data as DateTimeOffset[];
+
+      columns.TryGetValue("_l", out var levelColumn);
+      var levelData = levelColumn?.Data as string[];
+
+      columns.TryGetValue("_m", out var messageColumn);
+      var messageData = messageColumn?.Data as string[];
+
+      columns.TryGetValue("_traceid", out var traceIdColumn);
+      var traceIdData = traceIdColumn?.Data as string[];
+
+      columns.TryGetValue("_spanid", out var spanIdColumn);
+      var spanIdData = spanIdColumn?.Data as string[];
+
+      columns.TryGetValue("_duration_ms", out var durationColumn);
+      var durationNullableData = durationColumn?.Data as int?[];
+      var durationData = durationColumn?.Data as int[];
+
+      columns.TryGetValue("_meta", out var metaColumn);
+      var metaData = metaColumn?.Data as string[];
+
+      var dynamicColumns = new List<(string Name, DataColumn Column)>(Math.Max(0, columns.Count - FixedColumns.Count));
+      foreach (var (name, column) in columns) {
+        if (!FixedColumns.Contains(name)) {
+          dynamicColumns.Add((name, column));
+        }
+      }
+
       for (int i = 0; i < rowCount; i++) {
         cancellationToken.ThrowIfCancellationRequested();
 
+        DateTime? timestamp = null;
+        if (timestampDateTimeData != null) {
+          timestamp = timestampDateTimeData[i];
+        } else if (timestampDateTimeOffsetData != null) {
+          timestamp = timestampDateTimeOffsetData[i].UtcDateTime;
+        }
+
+        int? durationMs = null;
+        if (durationNullableData != null) {
+          durationMs = durationNullableData[i];
+        } else if (durationData != null) {
+          durationMs = durationData[i];
+        }
+
         var entry = new LogEntry {
-          Stream = GetString(columns, "_s", i) ?? "unknown",
-          Timestamp = GetDateTime(columns, "_t", i) ?? DateTime.UtcNow,
-          Level = GetString(columns, "_l", i),
-          Message = GetString(columns, "_m", i) ?? "",
-          TraceId = GetString(columns, "_traceid", i),
-          SpanId = GetString(columns, "_spanid", i),
-          DurationMs = GetNullableInt(columns, "_duration_ms", i),
+          Stream = streamData != null ? streamData[i] : "unknown",
+          Timestamp = timestamp ?? DateTime.UtcNow,
+          Level = levelData != null ? levelData[i] : null,
+          Message = messageData != null ? messageData[i] : "",
+          TraceId = traceIdData != null ? traceIdData[i] : null,
+          SpanId = spanIdData != null ? spanIdData[i] : null,
+          DurationMs = durationMs,
           Attributes = new Dictionary<string, object?>()
         };
 
         // Parse dynamic attribute columns
-        foreach (var (name, column) in columns) {
-          if (FixedColumns.Contains(name)) {
-            continue;
-          }
-
+        foreach (var (name, column) in dynamicColumns) {
           var value = GetColumnValue(column, i);
           if (value != null) {
             entry.Attributes[name] = value;
@@ -74,7 +117,7 @@ public static class ParquetReader
         }
 
         // Parse _meta overflow column
-        var metaJson = GetString(columns, "_meta", i);
+        var metaJson = metaData != null ? metaData[i] : null;
         if (!string.IsNullOrEmpty(metaJson)) {
           try {
             var meta = JsonSerializer.Deserialize<Dictionary<string, object?>>(metaJson);
@@ -166,19 +209,19 @@ public static class ParquetReader
 
     return data switch {
       string[] arr => arr[rowIndex],
-      int?[] arr => arr[rowIndex],
+      int?[] arr => arr[rowIndex] is int value ? value : null,
       int[] arr => arr[rowIndex],
-      long?[] arr => arr[rowIndex],
+      long?[] arr => arr[rowIndex] is long value ? value : null,
       long[] arr => arr[rowIndex],
-      float?[] arr => arr[rowIndex],
+      float?[] arr => arr[rowIndex] is float value ? value : null,
       float[] arr => arr[rowIndex],
-      double?[] arr => arr[rowIndex],
+      double?[] arr => arr[rowIndex] is double value ? value : null,
       double[] arr => arr[rowIndex],
-      bool?[] arr => arr[rowIndex],
+      bool?[] arr => arr[rowIndex] is bool value ? value : null,
       bool[] arr => arr[rowIndex],
-      DateTime?[] arr => arr[rowIndex],
+      DateTime?[] arr => arr[rowIndex] is DateTime value ? value : null,
       DateTime[] arr => arr[rowIndex],
-      DateTimeOffset?[] arr => (object?)arr[rowIndex]?.UtcDateTime,
+      DateTimeOffset?[] arr => arr[rowIndex] is DateTimeOffset value ? value.UtcDateTime : null,
       DateTimeOffset[] arr => arr[rowIndex].UtcDateTime,
       byte[][] arr => arr[rowIndex],
       _ => null

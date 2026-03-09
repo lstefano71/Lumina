@@ -1,4 +1,8 @@
+using FluentAssertions;
+
+using Lumina.Core.Models;
 using Lumina.Storage.Catalog;
+using Lumina.Storage.Parquet;
 
 using Microsoft.Extensions.Logging;
 
@@ -224,5 +228,121 @@ public sealed class CatalogRebuilderTests : IDisposable
     var entries = await _rebuilder.ScanL1FilesAsync("/nonexistent/path");
 
     Assert.Empty(entries);
+  }
+
+  // -----------------------------------------------------------------------
+  //  CompactionTier inference from embedded Parquet file metadata
+  // -----------------------------------------------------------------------
+
+  [Fact]
+  public async Task RecoverFromDisk_DailyL2File_WithCompactionTierMetadata_ShouldRebuildAsTier2()
+  {
+    var stream = "rebuild-daily";
+    var streamDir = Path.Combine(_l2Directory, stream);
+    Directory.CreateDirectory(streamDir);
+
+    var path = Path.Combine(streamDir, $"{stream}_20240110.parquet");
+    await WriteL2ParquetAsync(path, stream,
+        new DateTime(2024, 1, 10, 0, 0, 0, DateTimeKind.Utc), 5, compactionTier: 2);
+
+    var catalog = await _rebuilder.RecoverFromDiskAsync(_l1Directory, _l2Directory);
+
+    catalog.Entries.Should().ContainSingle();
+    catalog.Entries[0].CompactionTier.Should().Be(2);
+  }
+
+  [Fact]
+  public async Task RecoverFromDisk_MonthlyL2File_WithCompactionTierMetadata_ShouldRebuildAsTier3()
+  {
+    var stream = "rebuild-monthly";
+    var streamDir = Path.Combine(_l2Directory, stream);
+    Directory.CreateDirectory(streamDir);
+
+    var path = Path.Combine(streamDir, $"{stream}_202401.parquet");
+    await WriteL2ParquetAsync(path, stream,
+        new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc), 10, compactionTier: 3);
+
+    var catalog = await _rebuilder.RecoverFromDiskAsync(_l1Directory, _l2Directory);
+
+    catalog.Entries.Should().ContainSingle();
+    catalog.Entries[0].CompactionTier.Should().Be(3,
+        because: "monthly output files carry tier 3 in Parquet metadata");
+  }
+
+  [Fact]
+  public async Task RecoverFromDisk_L2FileWithoutMetadata_ShouldFallbackToIntLevel()
+  {
+    var stream = "rebuild-legacy";
+    var streamDir = Path.Combine(_l2Directory, stream);
+    Directory.CreateDirectory(streamDir);
+
+    // WriteBatchAsync does not embed metadata — simulates pre-metadata files
+    var path = Path.Combine(streamDir, $"{stream}_20240110.parquet");
+    var entries = BuildEntries(stream, new DateTime(2024, 1, 10, 0, 0, 0, DateTimeKind.Utc), 5);
+    await ParquetWriter.WriteBatchAsync(entries, path);
+
+    var catalog = await _rebuilder.RecoverFromDiskAsync(_l1Directory, _l2Directory);
+
+    catalog.Entries.Should().ContainSingle();
+    catalog.Entries[0].CompactionTier.Should().Be((int)StorageLevel.L2,
+        because: "files without metadata fall back to (int)StorageLevel");
+  }
+
+  [Fact]
+  public async Task RecoverFromDisk_MixedTierL2Files_ShouldInferCorrectTierPerFile()
+  {
+    var stream = "rebuild-mixed";
+    var streamDir = Path.Combine(_l2Directory, stream);
+    Directory.CreateDirectory(streamDir);
+
+    // A daily file from January 10 (tier 2)
+    var dailyPath = Path.Combine(streamDir, $"{stream}_20240110.parquet");
+    await WriteL2ParquetAsync(dailyPath, stream,
+        new DateTime(2024, 1, 10, 0, 0, 0, DateTimeKind.Utc), 5, compactionTier: 2);
+
+    // A monthly file from February (tier 3) — non-overlapping time range
+    var monthlyPath = Path.Combine(streamDir, $"{stream}_202402.parquet");
+    await WriteL2ParquetAsync(monthlyPath, stream,
+        new DateTime(2024, 2, 1, 0, 0, 0, DateTimeKind.Utc), 5, compactionTier: 3);
+
+    var catalog = await _rebuilder.RecoverFromDiskAsync(_l1Directory, _l2Directory);
+
+    catalog.Entries.Should().HaveCount(2);
+    catalog.Entries.Should().ContainSingle(e => e.CompactionTier == 2);
+    catalog.Entries.Should().ContainSingle(e => e.CompactionTier == 3);
+  }
+
+  // -----------------------------------------------------------------------
+  //  Helpers
+  // -----------------------------------------------------------------------
+
+  private static List<LogEntry> BuildEntries(string stream, DateTime baseTime, int count) =>
+      Enumerable.Range(0, count)
+          .Select(i => new LogEntry {
+            Stream = stream,
+            Timestamp = baseTime.AddSeconds(i),
+            Level = "info",
+            Message = $"msg-{i}",
+            Attributes = new Dictionary<string, object?>()
+          })
+          .ToList();
+
+  private static async Task WriteL2ParquetAsync(
+      string path, string stream, DateTime baseTime, int count, int compactionTier)
+  {
+    var entries = BuildEntries(stream, baseTime, count);
+
+    async IAsyncEnumerable<IReadOnlyList<LogEntry>> SingleChunk(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+      yield return entries;
+    }
+
+    await ParquetWriter.WriteChunkedAsync(
+        SingleChunk(),
+        path,
+        fileMetadata: new Dictionary<string, string> {
+          ["lumina.compaction_tier"] = compactionTier.ToString()
+        });
   }
 }
