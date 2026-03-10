@@ -206,6 +206,14 @@ public static class ParquetWriter
               masterSchema.Where(c => !c.IsOverflow).Select(c => c.Name).ToHashSet(),
               maxDynamicKeys);
 
+          // Always include _meta in master schema so subsequent chunks can route
+          // attributes not present in chunk1 to the overflow column.
+          var masterSchemaList = masterSchema.ToList();
+          if (!masterSchemaList.Any(c => c.Name == "_meta")) {
+            masterSchemaList.Add(new ColumnSchema { Name = "_meta", Type = SchemaType.Json, IsNullable = true, IsOverflow = true });
+            masterSchema = masterSchemaList;
+          }
+
           var fieldDataPairs = CollectFieldDataPairs(chunk, masterSchema, overflowKeys);
           masterFields = fieldDataPairs.Select(p => p.Field).ToList();
           masterParquetSchema = new ParquetSchema(masterFields);
@@ -240,8 +248,17 @@ public static class ParquetWriter
           var combinedOverflowKeys = new HashSet<string>(baseOverflowKeys);
           combinedOverflowKeys.UnionWith(extraOverflowKeys);
 
+          // If overflow keys exist, ensure _meta is in the effective chunk schema
+          // so BuildMetaValues is called and the overflow data is generated.
+          IReadOnlyList<ColumnSchema> effectiveChunkSchema = chunkSchema;
+          if (combinedOverflowKeys.Count > 0 && !chunkSchema.Any(c => c.Name == "_meta")) {
+            var schemaList = chunkSchema.ToList();
+            schemaList.Add(new ColumnSchema { Name = "_meta", Type = SchemaType.Json, IsNullable = true, IsOverflow = true });
+            effectiveChunkSchema = schemaList;
+          }
+
           // Build a lookup of chunk field data pairs by name
-          var chunkPairs = CollectFieldDataPairs(chunk, chunkSchema, combinedOverflowKeys);
+          var chunkPairs = CollectFieldDataPairs(chunk, effectiveChunkSchema, combinedOverflowKeys);
           var chunkPairMap = new Dictionary<string, (DataField Field, Array Data)>();
           foreach (var pair in chunkPairs) {
             chunkPairMap[pair.Field.Name] = pair;
