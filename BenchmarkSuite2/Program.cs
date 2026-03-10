@@ -2,11 +2,11 @@ using BenchmarkDotNet.Running;
 
 namespace BenchmarkSuite2
 {
-    internal class Program
+  internal class Program
+  {
+    static void Main(string[] args)
     {
-        static void Main(string[] args)
-        {
-            var _ = BenchmarkRunner.Run(typeof(Program).Assembly);
-        }
+      var _ = BenchmarkRunner.Run(typeof(Program).Assembly);
     }
+  }
 }

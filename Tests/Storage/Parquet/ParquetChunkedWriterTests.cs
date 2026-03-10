@@ -191,8 +191,7 @@ public sealed class ParquetChunkedWriterTests : IDisposable
 
     chunk2Read.Should().HaveCount(5);
     // attr1 is null-filled → ParquetReader skips null values → key is absent
-    chunk2Read.Should().AllSatisfy(e =>
-    {
+    chunk2Read.Should().AllSatisfy(e => {
       if (e.Attributes.TryGetValue("attr1", out var v))
         v.Should().BeNull();
     });
